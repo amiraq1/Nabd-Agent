@@ -53,7 +53,7 @@ class SearchTool:
         command = [
             rg, "--files-with-matches", "--fixed-strings", "--hidden",
             "--glob", "!.git/**", "--glob", "!.env", "--glob", "!.env.*",
-            "--glob", "!.ssh/**", "--glob", "!.aws/**", "--glob", "!.config/**",
+            "--glob", "!.ssh/**", "--glob", "!.aws/**", "--glob", "!.config/**", "--glob", "!.nabd/**",
             query, str(target),
         ]
         try:
@@ -78,7 +78,7 @@ class SearchTool:
         for path in sorted(target.rglob("*")):
             if len(matches) >= limit:
                 break
-            if not path.is_file():
+            if not path.is_file() or ".nabd" in path.relative_to(self.root).parts:
                 continue
             try:
                 safe_path = self.jail.check_path(path, allow_missing=False)

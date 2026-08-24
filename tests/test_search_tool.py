@@ -20,6 +20,16 @@ class SearchToolTests(unittest.TestCase):
             self.assertEqual(facts.details["result"], "MATCH")
             self.assertIn("backend", facts.details)
 
+    def test_search_ignores_nabd_runtime_artifacts(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / ".nabd" / "backups").mkdir(parents=True)
+            (root / ".nabd" / "evidence.json").write_text("needle", encoding="utf-8")
+            (root / ".nabd" / "backups" / "hello.py.backup").write_text("needle", encoding="utf-8")
+            (root / "real.py").write_text("needle", encoding="utf-8")
+            facts = SearchTool(root).run("needle")
+            self.assertEqual(facts.details["matches"], ["real.py"])
+
     def test_search_limits_results_to_50(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

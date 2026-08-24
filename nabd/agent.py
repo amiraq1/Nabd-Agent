@@ -49,11 +49,20 @@ def _as_plan(data: Dict[str, Any]) -> Plan:
     verification = data.get("verification", [])
     if not isinstance(verification, list):
         verification = []
+    tool_names = {"list_files", "read_file", "write_file", "search", "run_command"}
+    clean_verification = []
+    for command in verification[:8]:
+        text = str(command).strip()
+        # Models sometimes echo the tool name instead of providing a shell
+        # command. Never execute that placeholder as a real command.
+        if not text or text in tool_names or text.startswith("run_command:"):
+            continue
+        clean_verification.append(text)
     return Plan(
         summary=str(data.get("summary", "")),
         steps=[str(step) for step in data.get("steps", [])][:20],
         tool_calls=actions,
-        verification=[str(command) for command in verification][:8],
+        verification=clean_verification,
     )
 
 
