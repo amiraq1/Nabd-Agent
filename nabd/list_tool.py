@@ -24,6 +24,9 @@ class ListTool:
         for path in sorted(target.rglob("*")):
             if not path.is_file():
                 continue
+            # Hide Nabd's own runtime artifacts so they never enter model context.
+            if ".nabd" in path.parts:
+                continue
             try:
                 safe_path = self.jail.check_path(path, allow_missing=False)
             except JailError:

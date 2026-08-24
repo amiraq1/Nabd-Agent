@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
@@ -33,6 +34,53 @@ Only use the five listed tools. The search tool accepts {"query": "text", "path"
 """
 
 
+# Tool names the model may hallucinate as a verification shell command.
+# They are agent tools, not shell commands, so executing them only produces
+# spurious failures -- strip them before building run_command calls.
+BLOCKED_VERIFICATION = frozenset(
+    {
+        "run_command",
+        "write_file",
+        "read_file",
+        "list_files",
+        "search",
+        "write",
+        "read",
+        "list",
+        "shell",
+    }
+)
+
+
+def _sanitize_verification(commands: Any) -> List[str]:
+    """Strip hallucinated tool-name prefixes from the verification list.
+
+    The model occasionally echoes an action tool name at the start of a
+    verification entry -- with or without a separator, e.g.
+    ``"run_command: python hello.py"`` or ``"run_command python hello.py"`` --
+    or emits a bare tool name like ``"run_command"``. Those are agent tools,
+    not shell commands; executing them literally (``run_command: not found``)
+    breaks the verification gate and wrongly REJECTS a successful task.
+    Recover the real command by dropping a leading tool-name token (and any
+    following ``:`` / whitespace) and filtering out bare tool names.
+    """
+    if not isinstance(commands, list):
+        return []
+    # Longest names first so "list_files" wins over "list" during matching.
+    prefix_re = re.compile(
+        r"(?:" + "|".join(re.escape(name) for name in sorted(BLOCKED_VERIFICATION, key=len, reverse=True)) + r")\b"
+    )
+    cleaned: List[str] = []
+    for raw in commands:
+        command = str(raw).strip()
+        match = prefix_re.match(command)
+        if match:
+            command = command[match.end():].lstrip(": ").strip()
+        if command and command not in BLOCKED_VERIFICATION:
+            cleaned.append(command)
+    return cleaned[:8]
+
+
 def _as_plan(data: Dict[str, Any]) -> Plan:
     raw_actions = data.get("actions", [])
     actions: List[ToolCall] = []
@@ -46,14 +94,12 @@ def _as_plan(data: Dict[str, Any]) -> Plan:
             raise LLMError("Tool arguments must be an object")
         actions.append(ToolCall(item["name"], arguments))
 
-    verification = data.get("verification", [])
-    if not isinstance(verification, list):
-        verification = []
+    verification = _sanitize_verification(data.get("verification"))
     return Plan(
         summary=str(data.get("summary", "")),
         steps=[str(step) for step in data.get("steps", [])][:20],
         tool_calls=actions,
-        verification=[str(command) for command in verification][:8],
+        verification=verification,
     )
 
 

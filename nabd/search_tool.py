@@ -31,7 +31,7 @@ class SearchTool:
             matches = self._search_python(query, target, limit)
             backend = "python_fallback"
         details = {
-            "matches": matches,
+            "matches": sorted(matches),
             "count": len(matches),
             "result": "MATCH" if matches else "NO_MATCH",
             "backend": backend,
@@ -54,6 +54,7 @@ class SearchTool:
             rg, "--files-with-matches", "--fixed-strings", "--hidden",
             "--glob", "!.git/**", "--glob", "!.env", "--glob", "!.env.*",
             "--glob", "!.ssh/**", "--glob", "!.aws/**", "--glob", "!.config/**",
+            "--glob", "!.nabd/**",
             query, str(target),
         ]
         try:
@@ -78,6 +79,8 @@ class SearchTool:
         for path in sorted(target.rglob("*")):
             if len(matches) >= limit:
                 break
+            if ".nabd" in path.parts:
+                continue
             if not path.is_file():
                 continue
             try:

@@ -42,6 +42,21 @@ class SearchToolTests(unittest.TestCase):
             self.assertEqual(facts.status, "TOOL_ERROR")
             self.assertIsNotNone(facts.error)
 
+    def test_does_not_leak_dot_nabd_evidence_or_backups(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "src").mkdir()
+            (root / "src" / "main.py").write_text("needle", encoding="utf-8")
+            (root / ".nabd").mkdir()
+            (root / ".nabd" / "evidence.json").write_text("needle", encoding="utf-8")
+            (root / ".nabd" / "backups").mkdir()
+            (root / ".nabd" / "backups" / "app.py.backup.123").write_text("needle", encoding="utf-8")
+            facts = SearchTool(root).run("needle")
+            matches = facts.details["matches"]
+            self.assertEqual(matches, ["src/main.py"])
+            for path in matches:
+                self.assertNotIn(".nabd", Path(path).parts)
+
 
 if __name__ == "__main__":
     unittest.main()

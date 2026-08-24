@@ -2,7 +2,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from nabd.agent import NabdAgent
+from nabd.agent import NabdAgent, _as_plan
 
 
 class FakeClient:
@@ -32,6 +32,23 @@ class AgentTests(unittest.TestCase):
             self.assertTrue(result.ok)
             self.assertEqual(result.state, "COMPLETED")
             self.assertTrue((Path(directory) / "hello.py").exists())
+
+    def test_verification_strips_hallucinated_tool_names(self):
+        plan = _as_plan(
+            {
+                "verification": [
+                    "run_command",                   # bare hallucination -> dropped
+                    "run_command: python hello.py",  # colon form -> keeps command
+                    "run_command flake8 .",          # space form (real bug) -> keeps command
+                    "python3 -m compileall .",       # genuine command -> kept
+                    "write_file",                    # bare hallucination -> dropped
+                ]
+            }
+        )
+        self.assertEqual(
+            plan.verification,
+            ["python hello.py", "flake8 .", "python3 -m compileall ."],
+        )
 
 
 if __name__ == "__main__":
