@@ -21,7 +21,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--root", "--workspace", dest="root", default=".",
         help="جذر المشروع، الافتراضي هو المجلد الحالي",
     )
-    parser.add_argument("--provider", choices=["auto", "openai", "gemini"], default=os.getenv("NABD_PROVIDER", "auto"))
+    parser.add_argument("--provider", choices=["auto", "openai", "gemini", "nvidia"], default=os.getenv("NABD_PROVIDER", "auto"))
     parser.add_argument("--max-rounds", type=int, default=5, help="الحد الأقصى لدورات الإصلاح")
     approval = parser.add_mutually_exclusive_group()
     approval.add_argument(

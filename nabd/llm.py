@@ -66,25 +66,31 @@ class LLMClient:
         self.provider = self._select_provider(requested)
         if self.provider == "openai":
             self.model = os.getenv("NABD_OPENAI_MODEL", "gpt-4o-mini")
-        else:
+        elif self.provider == "gemini":
             self.model = os.getenv("NABD_GEMINI_MODEL", "gemini-2.0-flash")
+        else:
+            self.model = os.getenv("NABD_NVIDIA_MODEL", "meta/llama-3.1-8b-instruct")
 
     @staticmethod
     def _select_provider(requested: str) -> str:
-        if requested in {"openai", "gemini"}:
+        if requested in {"openai", "gemini", "nvidia"}:
             return requested
         if requested not in {"auto", ""}:
-            raise LLMError("NABD_PROVIDER must be auto, openai, or gemini")
+            raise LLMError("NABD_PROVIDER must be auto, openai, gemini, or nvidia")
+        if os.getenv("NVIDIA_API_KEY"):
+            return "nvidia"
         if os.getenv("OPENAI_API_KEY"):
             return "openai"
         if os.getenv("GEMINI_API_KEY"):
             return "gemini"
-        raise LLMError("Set OPENAI_API_KEY or GEMINI_API_KEY before starting Nabd")
+        raise LLMError("Set NVIDIA_API_KEY, OPENAI_API_KEY, or GEMINI_API_KEY before starting Nabd")
 
     def complete(self, system: str, user: str) -> str:
         if self.provider == "openai":
             return self._openai(system, user)
-        return self._gemini(system, user)
+        if self.provider == "gemini":
+            return self._gemini(system, user)
+        return self._nvidia(system, user)
 
     def complete_json(self, system: str, user: str) -> Dict[str, Any]:
         return extract_json(self.complete(system, user))
@@ -111,6 +117,29 @@ class LLMClient:
             return data["choices"][0]["message"]["content"]
         except (KeyError, IndexError, TypeError) as exc:
             raise LLMError(f"Unexpected OpenAI response: {str(data)[:800]}") from exc
+
+    def _nvidia(self, system: str, user: str) -> str:
+        key = os.getenv("NVIDIA_API_KEY")
+        if not key:
+            raise LLMError("NVIDIA_API_KEY is not set")
+        payload = {
+            "model": self.model,
+            "temperature": 0.1,
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+            "response_format": {"type": "json_object"},
+        }
+        data = _request_json(
+            os.getenv("NABD_NVIDIA_BASE_URL", "https://integrate.api.nvidia.com/v1/chat/completions"),
+            payload,
+            {"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+        )
+        try:
+            return data["choices"][0]["message"]["content"]
+        except (KeyError, IndexError, TypeError) as exc:
+            raise LLMError(f"Unexpected NVIDIA response: {str(data)[:800]}") from exc
 
     def _gemini(self, system: str, user: str) -> str:
         key = os.getenv("GEMINI_API_KEY")

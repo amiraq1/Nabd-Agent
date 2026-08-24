@@ -46,6 +46,8 @@ cp .env.example .env.local
 export OPENAI_API_KEY="ضع_المفتاح_هنا"
 # أو استخدم Gemini:
 # export GEMINI_API_KEY="ضع_المفتاح_هنا"
+# أو استخدم NVIDIA NIM:
+# export NVIDIA_API_KEY="nvapi-ضع-المفتاح-هنا"
 ```
 
 يمكن بدلًا من ذلك تحميل متغيرات بيئة من ملف خاص لا تضفه إلى Git:
@@ -56,12 +58,16 @@ set -a
 set +a
 ```
 
-يدعم الوكيل `--provider auto` تلقائيًا، أو يمكنك تحديد المزود صراحةً:
+يدعم الوكيل `--provider auto` تلقائيًا؛ عند وجود `NVIDIA_API_KEY` يختار NVIDIA أولًا، ثم OpenAI، ثم Gemini. ويمكنك تحديد المزود صراحةً باستخدام `--provider openai` أو `--provider gemini` أو `--provider nvidia`. لا تضع مفتاح NVIDIA في GitHub، بل احفظه داخل `.env.local` المحلي فقط.
 
 ```sh
 export NABD_PROVIDER=openai
 # أو
 export NABD_PROVIDER=gemini
+# أو NVIDIA NIM
+# export NABD_PROVIDER=nvidia
+# export NABD_NVIDIA_MODEL="meta/llama-3.1-8b-instruct"
+# export NABD_NVIDIA_BASE_URL="https://integrate.api.nvidia.com/v1/chat/completions"
 ```
 
 ## الاستخدام
