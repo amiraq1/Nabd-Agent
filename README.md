@@ -111,12 +111,12 @@ python3 -m compileall -q nabd
 | الملف | الغرض |
 | --- | --- |
 | `nabd/fsm.py` | آلة الحالات المستوحاة من الملف المشارك. |
-| `nabd/agent.py` | حلقة التخطيط والتنفيذ والتحقق والإصلاح. |
+| `nabd/agent.py` | حلقة التخطيط والتنفيذ والتحقق والإصلاح، وتطهير بادئات `run_command` الوهمية قبل تنفيذ التحقق. |
 | `nabd/llm.py` | اتصال OpenAI وGemini باستخدام HTTP ومكتبات Python القياسية. |
 | `nabd/tools.py` | طبقة تحويل ToolCall إلى ToolResult يحمل RawFacts، دون إصدار Evidence من الأداة. |
 | `nabd/write_tool.py` | أداة كتابة تعيد RawFacts عن الملف والنسخة الاحتياطية؛ لا تصدر Evidence. |
 | `nabd/read_tool.py` | أداة قراءة تعيد RawFacts بالمحتوى والهاش وبيانات truncation. |
-| `nabd/list_tool.py` | أداة سرد تعيد files/count/truncated داخل RawFacts بحد 200 ملف. |
+| `nabd/list_tool.py` | أداة سرد تعيد files/count/truncated داخل RawFacts بحد 200 ملف، وتتجاهل `.nabd` وآثار التشغيل. |
 | `nabd/search_tool.py` | بحث يعيد MATCH/NO_MATCH/TOOL_ERROR وبيان fallback داخل RawFacts. |
 | `nabd/shell_tool.py` | أداة shell تعيد exit_code/timeout/stdout/stderr/signal داخل RawFacts. |
 | `nabd/jail.py` | عزل مسارات workspace وفحص الروابط الرمزية وأنماط الأوامر الخطرة. |

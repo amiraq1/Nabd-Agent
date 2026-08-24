@@ -22,7 +22,7 @@ class ListTool:
         files: list[str] = []
         saw_more = False
         for path in sorted(target.rglob("*")):
-            if not path.is_file():
+            if not path.is_file() or ".nabd" in path.relative_to(self.root).parts:
                 continue
             try:
                 safe_path = self.jail.check_path(path, allow_missing=False)

@@ -19,6 +19,17 @@ class ListToolTests(unittest.TestCase):
             self.assertEqual(facts.details["count"], 1)
             self.assertFalse(facts.truncated)
 
+    def test_does_not_leak_nabd_runtime_artifacts(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / ".nabd" / "backups").mkdir(parents=True)
+            (root / ".nabd" / "evidence.json").write_text("{}", encoding="utf-8")
+            (root / ".nabd" / "backups" / "old.py").write_text("x", encoding="utf-8")
+            (root / "hello.py").write_text("print('hello')", encoding="utf-8")
+            facts = ListTool(root).run()
+            self.assertEqual(facts.details["files"], ["hello.py"])
+            self.assertFalse(any(".nabd" in path for path in facts.details["files"]))
+
     def test_limits_output_to_200_files_and_reports_truncation(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

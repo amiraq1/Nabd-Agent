@@ -55,7 +55,15 @@ def _as_plan(data: Dict[str, Any]) -> Plan:
         text = str(command).strip()
         # Models sometimes echo the tool name instead of providing a shell
         # command. Never execute that placeholder as a real command.
-        if not text or text in tool_names or text.startswith("run_command:"):
+        if not text:
+            continue
+        if text == "run_command":
+            continue
+        if text.startswith("run_command:"):
+            text = text[len("run_command:"):].strip()
+        elif text.startswith("run_command "):
+            text = text[len("run_command "):].strip()
+        if not text or text in tool_names:
             continue
         clean_verification.append(text)
     return Plan(
