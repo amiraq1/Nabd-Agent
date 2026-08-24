@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from .models import ToolCall, ToolResult
+from .jail import JailError
 from .raw_facts import RawFacts
 from .evidence import EvidenceStore
 from .list_tool import ListTool
@@ -49,7 +50,7 @@ class ToolExecutor:
                 return ToolResult(call.name, False, "Action rejected by user", 126)
             raw = self._dispatch(call)
             return self._result(call.name, raw)
-        except (ToolError, OSError, ValueError) as exc:
+        except (ToolError, JailError, OSError, ValueError) as exc:
             return ToolResult(call.name, False, str(exc), 1)
 
     def _approved(self, call: ToolCall) -> bool:

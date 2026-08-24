@@ -76,6 +76,14 @@ class JailTests(unittest.TestCase):
             self.assertFalse(result.ok)
             self.assertIn("Blocked command", result.output)
 
+    def test_tool_executor_converts_missing_read_to_failed_result(self):
+        with tempfile.TemporaryDirectory() as directory:
+            executor = ToolExecutor(Path(directory), auto_approve=True)
+            result = executor.execute(ToolCall("read_file", {"path": "missing.py"}))
+            self.assertFalse(result.ok)
+            self.assertIn("does not exist", result.output.lower())
+            self.assertEqual(result.exit_code, 1)
+
     def test_accepts_string_workspace_and_blocks_backslash_traversal(self):
         with tempfile.TemporaryDirectory() as directory:
             jail = WorkspaceJail(directory)

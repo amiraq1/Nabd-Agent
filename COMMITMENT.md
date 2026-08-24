@@ -11,10 +11,10 @@
 | FSM | مكتملة؛ تمنع الانتقال المباشر من `PLANNING` إلى `COMPLETED` وتتعامل مع `REJECTED` كحالة نهائية. |
 | EvidenceStore v2 | مكتمل؛ يتحقق من RawFacts بإعادة قراءة القرص، ويربط الأدلة بـ task_id وoperation_id وSHA-256 وfresh/relevant/valid. |
 | Workspace Jail | مكتمل؛ يمنع المسارات الخارجية و`.git` ومسارات الأسرار، ويمنع هروب الروابط الرمزية والأوامر الخطرة المعروفة. |
-| أدوات المشروع | الأدوات الخمس تعيد RawFacts فقط بعد WorkspaceJail؛ لا تصدر OBSERVED بنفسها. وSearchTool متاحة داخل ToolExecutor، مع نسخ احتياطي تلقائي قبل تعديل ملف موجود. |
+| أدوات المشروع | الأدوات الخمس تعيد RawFacts فقط بعد WorkspaceJail؛ لا تصدر OBSERVED بنفسها. وToolExecutor يحتوي أخطاء JailError وأخطاء الملفات كـ ToolResult فاشل بدل إسقاط الجلسة، مع نسخ احتياطي تلقائي قبل تعديل ملف موجود. |
 | `nabd-verify` | يدعم `hash` و`verify` و`jail` و`backup`. |
 | Rust verifier | نسخة اختيارية داخل `rust-verifier/`، ولا تُعد متطلبًا لتشغيل Nabd الأساسي. |
-| الاختبارات | **54 اختبارًا ناجحًا** في آخر فحص شامل، منها اختبارات RawFacts وtask_id وfresh وrelevant وكشف العبث وبوابة FSM واختيار NVIDIA ومسار الإصلاح بعد فشل سابق. |
+| الاختبارات | **55 اختبارًا ناجحًا** في آخر فحص شامل، منها اختبارات RawFacts وtask_id وfresh وrelevant وكشف العبث وبوابة FSM واختيار NVIDIA ومسار الإصلاح بعد فشل سابق واحتواء JailError. |
 
 ## قواعد التشغيل
 

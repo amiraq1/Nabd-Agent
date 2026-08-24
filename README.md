@@ -120,11 +120,12 @@ python3 -m compileall -q nabd
 | `nabd/search_tool.py` | بحث يعيد MATCH/NO_MATCH/TOOL_ERROR وبيان fallback داخل RawFacts. |
 | `nabd/shell_tool.py` | أداة shell تعيد exit_code/timeout/stdout/stderr/signal داخل RawFacts. |
 | `nabd/jail.py` | عزل مسارات workspace وفحص الروابط الرمزية وأنماط الأوامر الخطرة. |
-| `nabd/evidence.py` | EvidenceStore v2؛ يعيد قراءة الملفات ويتحقق من RawFacts وtask_id وfresh/relevant/valid قبل إصدار `OBSERVED`. |
+| `nabd/evidence.py` | EvidenceStore v2؛ يعيد قراءة الملفات ويتحقق من RawFacts وtask_id وfresh/relevant/valid قبل إصدار `OBSERVED`، ولا يجعل محاولات فاشلة سابقة تمنع إصلاحًا موثقًا لاحقًا. |
+| `nabd/tools.py` | ToolExecutor؛ يحتوي ToolError وJailError وأخطاء الملفات ويحوّلها إلى ToolResult فاشل بدل إسقاط جلسة الوكيل. |
 | `nabd/cli.py` | واجهة سطر الأوامر. |
 | `install.sh` | تثبيت الأمر `nabd` وربطه داخل `$PREFIX/bin`. |
 | `tests/test_fsm.py` | اختبارات آلة الحالات. |
-| `tests/test_jail.py` | اختبارات عزل المسارات، الروابط الرمزية، اجتياز المسارات، والأوامر الخطرة. |
+| `tests/test_jail.py` | اختبارات عزل المسارات، الروابط الرمزية، اجتياز المسارات، الأوامر الخطرة، واحتواء قراءة ملف مفقود. |
 | `tests/test_tool_evidence_integration.py` | اختبار التكامل والفصل بين RawFacts وEvidence، مع task_id وكشف العبث. |
 
 ## ملاحظات تشغيلية
