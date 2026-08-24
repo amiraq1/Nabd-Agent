@@ -24,6 +24,10 @@ class FakeClient:
 
 
 class AgentTests(unittest.TestCase):
+    def test_plan_sanitizes_tool_name_from_verification(self):
+        plan = _as_plan({"verification": ["run_command", "run_command: python hello.py", "run_command python3 -m compileall .", "python3 -m compileall ."]})
+        self.assertEqual(plan.verification, ["python hello.py", "python3 -m compileall .", "python3 -m compileall ."])
+
     def test_agent_reaches_completed_after_verification(self):
         with tempfile.TemporaryDirectory() as directory:
             agent = NabdAgent(Path(directory), auto_approve=True)
