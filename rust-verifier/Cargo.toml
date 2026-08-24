@@ -1,0 +1,14 @@
+[package]
+name = "verifier"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+sha2 = "0.10"
+clap = { version = "4.4", features = ["derive"] }
+
+[profile.release]
+opt-level = "s"
+lto = true
+strip = true
+codegen-units = 1
