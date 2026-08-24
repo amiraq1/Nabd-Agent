@@ -20,6 +20,12 @@ class CLITests(unittest.TestCase):
         args = build_parser().parse_args(["مهمة تجريبية", "--workspace", "/tmp/project"])
         self.assertEqual(args.root, "/tmp/project")
 
+    def test_workspace_free_mode_is_opt_in(self):
+        normal = build_parser().parse_args(["مهمة تجريبية"])
+        free = build_parser().parse_args(["مهمة تجريبية", "--workspace-free"])
+        self.assertFalse(normal.workspace_free)
+        self.assertTrue(free.workspace_free)
+
 
 if __name__ == "__main__":
     unittest.main()

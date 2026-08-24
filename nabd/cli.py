@@ -23,6 +23,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--provider", choices=["auto", "openai", "gemini", "nvidia"], default=os.getenv("NABD_PROVIDER", "auto"))
     parser.add_argument("--max-rounds", type=int, default=5, help="الحد الأقصى لدورات الإصلاح")
+    parser.add_argument(
+        "--workspace-free",
+        action="store_true",
+        help="حرية الأدوات داخل workspace دون موافقات أو Mutation Policy؛ تبقى حدود WorkspaceJail فعالة",
+    )
     approval = parser.add_mutually_exclusive_group()
     approval.add_argument(
         "--yes", "--auto", dest="auto_approve", action="store_true", default=True,
@@ -45,9 +50,20 @@ def main(argv: list[str] | None = None) -> int:
         parser.error(f"مجلد المشروع غير موجود: {root}")
 
     print(f"Nabd يعمل داخل: {root}")
-    print(f"المزود: {args.provider} | التنفيذ التلقائي: {'نعم' if args.auto_approve else 'لا'}")
+    effective_auto_approve = args.auto_approve or args.workspace_free
+    print(
+        f"المزود: {args.provider} | التنفيذ التلقائي: "
+        f"{'نعم' if effective_auto_approve else 'لا'}"
+    )
+    if args.workspace_free:
+        print("وضع الأدوات: workspace-free (داخل الجذر فقط)")
     try:
-        agent = NabdAgent(root, provider=args.provider, auto_approve=args.auto_approve)
+        agent = NabdAgent(
+            root,
+            provider=args.provider,
+            auto_approve=effective_auto_approve,
+            workspace_free=args.workspace_free,
+        )
     except LLMError as exc:
         print(f"خطأ في إعداد المزود: {exc}", file=sys.stderr)
         return 2

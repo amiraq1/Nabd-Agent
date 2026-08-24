@@ -169,18 +169,25 @@ def _context(task: str, files: str, history: List[ToolResult], failures: List[To
 
 
 class NabdAgent:
-    def __init__(self, root: Path, provider: str = "auto", auto_approve: bool = False) -> None:
+    def __init__(
+        self,
+        root: Path,
+        provider: str = "auto",
+        auto_approve: bool = False,
+        workspace_free: bool = False,
+    ) -> None:
         self.client = LLMClient(provider)
         self.fsm = FSM()
         self.history: List[ToolResult] = []
-        self.auto_approve = auto_approve
+        self.auto_approve = auto_approve or workspace_free
+        self.workspace_free = workspace_free
         self.intent = "MUTATING"
         self.task_id = EvidenceStore.new_task_id()
         self.evidence = EvidenceStore(root, task_id=self.task_id)
         self.executor = ToolExecutor(
             root,
             approve=self._approve,
-            auto_approve=auto_approve,
+            auto_approve=self.auto_approve,
             evidence_store=self.evidence,
         )
 
@@ -209,7 +216,7 @@ class NabdAgent:
 
     def run(self, task: str, max_rounds: int = 5) -> AgentResult:
         try:
-            self.intent = classify_intent(task)
+            self.intent = "MUTATING" if self.workspace_free else classify_intent(task)
             self.executor.set_intent(self.intent)
             inventory = self.executor.execute(ToolCall("list_files", {"path": "."}))
             self.history.append(inventory)

@@ -110,6 +110,39 @@ class MutationPolicyTests(unittest.TestCase):
             self.assertTrue(result.ok)
             self.assertEqual((root / "created.txt").read_text(encoding="utf-8"), "ok")
 
+    def test_workspace_free_never_writes_outside_workspace(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            agent = NabdAgent(root, auto_approve=False, workspace_free=True)
+            outside = root.parent / "nabd-workspace-outside.txt"
+            try:
+                result = agent.executor.execute(
+                    ToolCall(
+                        "write_file",
+                        {"path": "../nabd-workspace-outside.txt", "content": "blocked"},
+                    )
+                )
+                self.assertFalse(result.ok)
+                self.assertIn("blocked:", result.output)
+                self.assertFalse(outside.exists())
+            finally:
+                outside.unlink(missing_ok=True)
+
+    def test_workspace_free_agent_allows_write_without_confirmation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            agent = NabdAgent(root, auto_approve=False, workspace_free=True)
+            agent.client = ReadOnlyWriteClient()
+
+            result = agent.run("افحص المستودع واعطني ملخص", max_rounds=1)
+
+            self.assertTrue(result.ok)
+            self.assertEqual(result.state, "COMPLETED")
+            self.assertEqual(
+                (root / "README.md").read_text(encoding="utf-8"),
+                "must not be written",
+            )
+
     def test_mutating_task_can_write_when_auto_approved(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

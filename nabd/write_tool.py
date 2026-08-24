@@ -18,6 +18,10 @@ from .jail import WorkspaceJail
 from .raw_facts import RawFacts
 
 
+class WriteToolError(ValueError):
+    """Structured write failure surfaced through ToolExecutor."""
+
+
 def _sha256(p: pathlib.Path) -> Optional[str]:
     """Compute SHA-256 of a file, or None if missing."""
     if not p.exists() or not p.is_file():
@@ -71,7 +75,7 @@ class WriteTool:
         try:
             resolved = self.jail.check_path(path, allow_missing=True)
         except Exception as e:
-            raise RuntimeError(f"blocked: {e}")
+            raise WriteToolError(f"blocked: {e}") from e
 
         rel = resolved.relative_to(self.root)
 
@@ -127,7 +131,7 @@ class WriteTool:
             except Exception as e:
                 if tmp.exists():
                     tmp.unlink(missing_ok=True)
-                raise RuntimeError(f"write failed: {e}")
+                raise WriteToolError(f"write failed: {e}") from e
             finally:
                 if tmp.exists():
                     tmp.unlink(missing_ok=True)
@@ -135,7 +139,7 @@ class WriteTool:
             # 5. AFTER snapshot from the filesystem.
             after_sha = _sha256(resolved)
             if after_sha is None:
-                raise RuntimeError("after sha failed")
+                raise WriteToolError("after sha failed")
             after_stat = resolved.stat()
             after_size = after_stat.st_size
             after_mtime = after_stat.st_mtime
