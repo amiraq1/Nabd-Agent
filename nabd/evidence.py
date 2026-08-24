@@ -11,6 +11,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from .jail import WorkspaceJail
 from .raw_facts import RawFacts
 
 
@@ -52,6 +53,7 @@ class EvidenceStore:
         self.root = Path(root).expanduser().resolve()
         self.task_id = task_id
         self._evidence: List[Evidence] = []
+        self._jail = WorkspaceJail(self.root)
 
     @staticmethod
     def new_task_id() -> str:
@@ -233,9 +235,7 @@ class EvidenceStore:
         return self.is_usable_for_completion(self.task_id, max_age_seconds=None)
 
     def save(self, relative_path: str = ".nabd/evidence.json") -> Path:
-        target = (self.root / relative_path).resolve()
-        if target != self.root and self.root not in target.parents:
-            raise ValueError("Evidence output escapes the project root")
+        target = self._jail.check_internal_path(relative_path, allow_missing=True)
         target.parent.mkdir(parents=True, exist_ok=True)
         payload = {
             "generated_at": datetime.now(timezone.utc).isoformat(),

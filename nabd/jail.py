@@ -11,9 +11,11 @@ from typing import Iterable
 BLOCKED_PATH_PATTERNS = (
     re.compile(r"(?:^|/)\.git(?:/|$)", re.IGNORECASE),
     re.compile(r"(?:^|/)\.env(?:\.|/|$)", re.IGNORECASE),
+    re.compile(r"(?:^|/)\.nabd(?:/|$)", re.IGNORECASE),
     re.compile(r"(?:^|/)\.ssh(?:/|$)", re.IGNORECASE),
     re.compile(r"(?:^|/)\.aws(?:/|$)", re.IGNORECASE),
     re.compile(r"(?:^|/)\.config(?:/|$)", re.IGNORECASE),
+    re.compile(r"(?:/|^)__pycache__(?:/|$)", re.IGNORECASE),
     re.compile(r"(?:^|/)\.\.(?:/|$)"),
     re.compile(r"^/etc(?:/|$)"),
     re.compile(r"^/proc(?:/|$)"),
@@ -23,12 +25,12 @@ BLOCKED_PATH_PATTERNS = (
 BLOCKED_COMMAND_PATTERNS = (
     re.compile(r"\brm\s+-[a-z]*r[a-z]*f[a-z]*\s+(?:/|~|\*)", re.IGNORECASE),
     re.compile(r"\brm\s+-[a-z]*f[a-z]*r[a-z]*\s+(?:/|~|\*)", re.IGNORECASE),
-    re.compile(r"(?:curl|wget)[^\n|]*\|\s*/?(?:(?:[A-Za-z0-9_.-]+/)*(?:ba)?sh)\b", re.IGNORECASE),
+    re.compile(r"(?:curl|wget)[^\n|]*\s*\|\s*/?(?:(?:[A-Za-z0-9_.-]+/)*(?:ba)?sh)\b", re.IGNORECASE),
     re.compile(r"\beval\b", re.IGNORECASE),
     re.compile(r"\bexec\b", re.IGNORECASE),
     re.compile(r"(?:^|[;&|])\s*sudo\b", re.IGNORECASE),
     re.compile(r"\bchmod\s+(?:[0-7]*7[0-7]*|\+?r?wx)\b", re.IGNORECASE),
-    re.compile(r">\s*/(?:etc|proc|sys)(?:/|\s|$)", re.IGNORECASE),
+    re.compile(r">\s*/(?:etc|proc|sys)(?:\s|$)", re.IGNORECASE),
     re.compile(r"(?:^|[;&|])\s*dd\s+[^\n]*\bof=/dev/", re.IGNORECASE),
     re.compile(r"(?:^|[\s;&|])\.\.(?:[/\\]|$)", re.IGNORECASE),
 )
@@ -36,6 +38,23 @@ BLOCKED_COMMAND_PATTERNS = (
 
 class JailError(RuntimeError):
     """Raised when a workspace or command safety violation is detected."""
+
+
+# Patterns blocked only for public (model-facing) paths.
+# .nabd is included here so ReadTool/ListTool/SearchTool never expose
+# internal artifacts to the model context.
+PUBLIC_BLOCKED_PATH_PATTERNS = (
+    *BLOCKED_PATH_PATTERNS,
+)
+
+# Patterns blocked for internal (trusted-code) paths.
+# .nabd is *excluded* so WriteTool, verifier, and EvidenceStore can
+# access .nabd/backups and .nabd/evidence.json.  All other blocks
+# (root dirs, system paths, dotfiles) still apply.
+INTERNAL_BLOCKED_PATH_PATTERNS = tuple(
+    p for p in BLOCKED_PATH_PATTERNS
+    if p.pattern != r"(?:^|/)\.nabd(?:/|$)"
+)
 
 
 class WorkspaceJail:
@@ -46,11 +65,14 @@ class WorkspaceJail:
         if not self.workspace_root.is_dir():
             raise JailError(f"Workspace root does not exist: {workspace_root}")
 
-    def check_path(self, path: str | Path, allow_missing: bool = True) -> Path:
+    def _check_path_against(
+        self, path: str | Path, allow_missing: bool, patterns: tuple
+    ) -> Path:
+        """Shared implementation for check_path / check_internal_path."""
         raw_path = str(path)
         if re.search(r"(?:^|[/\\])\.\.(?:[/\\]|$)", raw_path):
             raise JailError(f"Blocked traversal path: {path}")
-        candidate = Path(path).expanduser()
+        candidate = Path(raw_path).expanduser()
         if not candidate.is_absolute():
             candidate = self.workspace_root / candidate
         candidate = candidate.resolve()
@@ -60,12 +82,24 @@ class WorkspaceJail:
             raise JailError(f"Path outside workspace: {path}") from exc
 
         path_string = str(candidate)
-        for pattern in BLOCKED_PATH_PATTERNS:
+        for pattern in patterns:
             if pattern.search(path_string):
                 raise JailError(f"Blocked path pattern: {path}")
         if not allow_missing and not candidate.exists():
             raise JailError(f"Path does not exist: {path}")
         return candidate
+
+    def check_path(self, path: str | Path, allow_missing: bool = True) -> Path:
+        """Public path check — blocks .nabd and all sensitive directories."""
+        return self._check_path_against(path, allow_missing, PUBLIC_BLOCKED_PATH_PATTERNS)
+
+    def check_internal_path(self, path: str | Path, allow_missing: bool = True) -> Path:
+        """Internal path check — allows .nabd for trusted artifact access.
+
+        Callers: WriteTool (backups), verifier (backups), EvidenceStore (save).
+        This must NOT be reachable from ToolCall arguments or model data.
+        """
+        return self._check_path_against(path, allow_missing, INTERNAL_BLOCKED_PATH_PATTERNS)
 
     def check_command(self, command: str) -> None:
         if not command.strip():

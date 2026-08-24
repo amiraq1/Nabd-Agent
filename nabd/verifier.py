@@ -36,7 +36,7 @@ def safe_file(jail: WorkspaceJail, raw_path: str) -> Path:
 
 
 def backup_file(jail: WorkspaceJail, target: Path, backup_dir: str | None = None) -> Path:
-    destination_dir = jail.check_path(
+    destination_dir = jail.check_internal_path(
         _workspace_path(jail, backup_dir or ".nabd/backups")
     )
     destination_dir.mkdir(parents=True, exist_ok=True)
