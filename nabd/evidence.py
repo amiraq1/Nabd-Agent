@@ -198,7 +198,11 @@ class EvidenceStore:
 
     def is_usable_for_completion(self, task_id: str, max_age_seconds: Optional[float] = 300.0) -> bool:
         observed = self.get_observed()
-        if not observed or self.get_inferred():
+        # Failed or inconclusive attempts are historical facts; they must not
+        # prove completion, but they also must not permanently poison a later
+        # successful verification in the same task. Completion is based only on
+        # the complete set of current, valid OBSERVED evidence.
+        if not observed:
             return False
         if any(
             item.task_id != task_id or not item.relevant or not item.fresh or not item.valid
@@ -223,7 +227,9 @@ class EvidenceStore:
         return True
 
     def all_observed(self) -> bool:
-        """Compatibility check; v2 callers should use is_usable_for_completion."""
+        """Legacy check: any inferred record keeps the old result incomplete."""
+        if self.get_inferred():
+            return False
         return self.is_usable_for_completion(self.task_id, max_age_seconds=None)
 
     def save(self, relative_path: str = ".nabd/evidence.json") -> Path:

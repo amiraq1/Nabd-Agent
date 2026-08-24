@@ -60,6 +60,20 @@ class ToolEvidenceIntegrationTests(unittest.TestCase):
             self.assertIsInstance(result.raw_facts, RawFacts)
             self.assertIn("app.py", result.output)
 
+    def test_failed_attempt_does_not_block_later_verified_repair(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            task_id = "task-repair"
+            store = EvidenceStore(root, task_id=task_id)
+            failed = ShellTool(root).run("python3 -c 'raise SystemExit(3)'")
+            failed_evidence = store.verify(failed, task_id=task_id)
+            self.assertEqual(failed_evidence.evidence_type, EvidenceType.INFERRED)
+            self.assertFalse(store.is_usable_for_completion(task_id))
+            repaired = WriteTool(root).run("hello.py", "print('fixed')")
+            verified = store.verify(repaired, task_id=task_id)
+            self.assertEqual(verified.evidence_type, EvidenceType.OBSERVED)
+            self.assertTrue(store.is_usable_for_completion(task_id))
+
     def test_failed_shell_is_not_completion_evidence(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
