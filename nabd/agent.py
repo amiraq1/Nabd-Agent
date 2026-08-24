@@ -52,6 +52,61 @@ BLOCKED_VERIFICATION = frozenset(
 )
 
 
+READ_ONLY_KEYWORDS = frozenset(
+    {
+        "افحص",
+        "فحص",
+        "ملخص",
+        "تلخيص",
+        "تقرير",
+        "اقرأ",
+        "قراءة",
+        "جرد",
+        "audit",
+        "inspect",
+        "summarize",
+        "summary",
+        "report",
+        "review",
+        "list",
+    }
+)
+
+MUTATING_KEYWORDS = frozenset(
+    {
+        "أنشئ",
+        "انشئ",
+        "اكتب",
+        "عدّل",
+        "عدل",
+        "أصلح",
+        "اصلح",
+        "احذف",
+        "حذف",
+        "غيّر",
+        "غير",
+        "create",
+        "write",
+        "edit",
+        "fix",
+        "refactor",
+        "modify",
+        "delete",
+        "remove",
+    }
+)
+
+
+def classify_intent(task: str) -> str:
+    """Classify task scope before planning; unknown tasks remain mutating."""
+    text = " ".join(str(task).lower().split())
+    if any(keyword in text for keyword in MUTATING_KEYWORDS):
+        return "MUTATING"
+    if any(keyword in text for keyword in READ_ONLY_KEYWORDS):
+        return "READ_ONLY"
+    return "MUTATING"
+
+
 def _sanitize_verification(commands: Any) -> List[str]:
     """Strip hallucinated tool-name prefixes from the verification list.
 
@@ -119,6 +174,7 @@ class NabdAgent:
         self.fsm = FSM()
         self.history: List[ToolResult] = []
         self.auto_approve = auto_approve
+        self.intent = "MUTATING"
         self.task_id = EvidenceStore.new_task_id()
         self.evidence = EvidenceStore(root, task_id=self.task_id)
         self.executor = ToolExecutor(
@@ -153,6 +209,8 @@ class NabdAgent:
 
     def run(self, task: str, max_rounds: int = 5) -> AgentResult:
         try:
+            self.intent = classify_intent(task)
+            self.executor.set_intent(self.intent)
             inventory = self.executor.execute(ToolCall("list_files", {"path": "."}))
             self.history.append(inventory)
             files = inventory.output
@@ -185,7 +243,21 @@ class NabdAgent:
                             relevant=call.name in {"write_file", "read_file", "search", "run_command"},
                         )
                 changes.extend(result.output for result in action_results if result.ok and result.name == "write_file")
+                policy_failures = [
+                    result
+                    for result in action_results
+                    if result.raw_facts is not None
+                    and result.raw_facts.status == "MUTATION_NOT_ALLOWED"
+                ]
                 self.fsm.transition(State.VERIFYING)
+                if policy_failures:
+                    # A blocked mutation is not a verification failure that a
+                    # shell command can override. Re-plan instead of allowing
+                    # unrelated successful verification to prove completion.
+                    failures = policy_failures
+                    print("\nتم حجب تغيير خارج نطاق المهمة؛ سيعيد الوكيل التخطيط.")
+                    self.fsm.transition(State.EXECUTING)
+                    continue
 
                 verification_calls = [ToolCall("run_command", {"command": command}) for command in plan.verification]
                 verification = self._run_calls(verification_calls)
