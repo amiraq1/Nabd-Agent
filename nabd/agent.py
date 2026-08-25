@@ -4,14 +4,24 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from .evidence import EvidenceStore
 from .fsm import FSM, FSMError, State
 from .llm import LLMClient, LLMError
 from .models import AgentResult, Plan, ToolCall, ToolResult
 from .tools import ToolExecutor, format_call
+from .verify.gate import VerificationGate, diff_snapshots, take_snapshot
+from .verify.types import (
+    Criterion,
+    CriterionKind,
+    Decision,
+    FailureSignature,
+    Report,
+    SuccessCriteria,
+)
 
 SYSTEM_PROMPT = """You are Nabd, a senior software engineer operating inside a user's local project.
 You must work in small, verifiable steps and return ONLY valid JSON.
@@ -108,20 +118,9 @@ def classify_intent(task: str) -> str:
 
 
 def _sanitize_verification(commands: Any) -> List[str]:
-    """Strip hallucinated tool-name prefixes from the verification list.
-
-    The model occasionally echoes an action tool name at the start of a
-    verification entry -- with or without a separator, e.g.
-    ``"run_command: python hello.py"`` or ``"run_command python hello.py"`` --
-    or emits a bare tool name like ``"run_command"``. Those are agent tools,
-    not shell commands; executing them literally (``run_command: not found``)
-    breaks the verification gate and wrongly REJECTS a successful task.
-    Recover the real command by dropping a leading tool-name token (and any
-    following ``:`` / whitespace) and filtering out bare tool names.
-    """
+    """Strip hallucinated tool-name prefixes from the verification list."""
     if not isinstance(commands, list):
         return []
-    # Longest names first so "list_files" wins over "list" during matching.
     prefix_re = re.compile(
         r"(?:" + "|".join(re.escape(name) for name in sorted(BLOCKED_VERIFICATION, key=len, reverse=True)) + r")\b"
     )
@@ -168,6 +167,60 @@ def _context(task: str, files: str, history: List[ToolResult], failures: List[To
     return json.dumps(payload, ensure_ascii=False, indent=2)
 
 
+def _build_success_criteria(
+    task_id: str,
+    task_description: str,
+    verification_commands: List[str],
+    changed_files: List[str],
+) -> SuccessCriteria:
+    """Build a SuccessCriteria document from the plan's verification commands.
+
+    This is the bridge between the LLM-proposed verification and the
+    deterministic gate.  The model proposes commands; the gate evaluates
+    them against evidence.
+    """
+    criteria: List[Criterion] = []
+
+    # 1. Each verification command becomes a command_exit_code criterion
+    for index, command in enumerate(verification_commands):
+        criteria.append(
+            Criterion(
+                id=f"verify_{index}",
+                kind=CriterionKind.COMMAND_EXIT_CODE,
+                command=command,
+                expected=0,
+                required=True,
+            )
+        )
+
+    # 2. At least one changed file must exist (if any files were written)
+    if changed_files:
+        criteria.append(
+            Criterion(
+                id="target_file_changed",
+                kind=CriterionKind.NO_UNKNOWN_CHANGES,
+                required=True,
+            )
+        )
+
+    # 3. No external changes allowed
+    criteria.append(
+        Criterion(
+            id="no_unknown_changes",
+            kind=CriterionKind.NO_UNKNOWN_CHANGES,
+            required=True,
+        )
+    )
+
+    return SuccessCriteria(
+        task_id=task_id,
+        description=task_description,
+        criteria=criteria,
+        max_repairs=3,
+        wall_clock_timeout_seconds=300,
+    )
+
+
 class NabdAgent:
     def __init__(
         self,
@@ -190,6 +243,15 @@ class NabdAgent:
             auto_approve=self.auto_approve,
             evidence_store=self.evidence,
         )
+        # Verification Gate state
+        self._snapshot_before: Dict[str, str] = {}
+        self._snapshot_after: Dict[str, str] = {}
+        self._unknown_paths: Set[str] = set()
+        self._changed_files: List[str] = []
+        self._repair_count: int = 0
+        self._budget_spent: int = 0
+        self._last_failure_signature: Optional[FailureSignature] = None
+        self._start_time: float = 0.0
 
     def _approve(self, call: ToolCall) -> bool:
         print(f"\nطلب الوكيل تنفيذ: {format_call(call)}")
@@ -214,8 +276,87 @@ class NabdAgent:
         )
         return _as_plan(response)
 
+    def _take_snapshot_before(self) -> None:
+        """Take a filesystem snapshot before task execution begins."""
+        try:
+            self._snapshot_before = take_snapshot(self.executor.root)
+        except Exception:
+            self._snapshot_before = {}
+
+    def _take_snapshot_after(self) -> None:
+        """Take a filesystem snapshot after execution and detect unknown changes."""
+        try:
+            self._snapshot_after = take_snapshot(self.executor.root)
+            diff = diff_snapshots(self._snapshot_before, self._snapshot_after)
+            # Unknown paths = changes not in our changed_files list
+            all_changed = set(diff["added"] + diff["removed"] + diff["changed"])
+            known = set(self._changed_files)
+            self._unknown_paths = all_changed - known
+        except Exception:
+            self._snapshot_after = {}
+
+    def _check_timeout(self) -> bool:
+        """Return True if the wall-clock timeout has been exceeded."""
+        if self._start_time <= 0:
+            return False
+        elapsed = time.time() - self._start_time
+        return elapsed > 300  # default 300s timeout
+
+    def _record_verification_evidence(self, verification: List[ToolResult], plan: Plan) -> None:
+        """Record verification results in the evidence store."""
+        for command, result in zip(plan.verification, verification):
+            if result.raw_facts is not None:
+                self.evidence.verify(
+                    result.raw_facts,
+                    claim=f"verification: {command}",
+                    task_id=self.task_id,
+                    relevant=result.ok,
+                )
+
+    def _run_with_gate(
+        self,
+        task: str,
+        plan: Plan,
+        action_results: List[ToolResult],
+        verification: List[ToolResult],
+    ) -> Report:
+        """Run the verification gate and return the report."""
+        # Build success criteria from the plan
+        criteria = _build_success_criteria(
+            task_id=self.task_id,
+            task_description=task,
+            verification_commands=plan.verification,
+            changed_files=self._changed_files,
+        )
+
+        # Take after-snapshot and detect unknown changes
+        self._take_snapshot_after()
+
+        # Create gate and evaluate
+        gate = VerificationGate(
+            root=self.executor.root,
+            evidence=self.evidence,
+            unknown_paths=self._unknown_paths,
+            snapshots_before=self._snapshot_before,
+            snapshots_after=self._snapshot_after,
+            changed_files=self._changed_files,
+            repair_count=self._repair_count,
+        )
+
+        report = gate.evaluate(criteria, budget_spent=self._budget_spent)
+
+        # Record the decision in evidence
+        self.evidence.add_inferred(
+            claim="verification_decision",
+            details=report.to_dict(),
+            task_id=self.task_id,
+        )
+
+        return report
+
     def run(self, task: str, max_rounds: int = 5) -> AgentResult:
         try:
+            self._start_time = time.time()
             self.intent = "MUTATING" if self.workspace_free else classify_intent(task)
             self.executor.set_intent(self.intent)
             inventory = self.executor.execute(ToolCall("list_files", {"path": "."}))
@@ -225,8 +366,30 @@ class NabdAgent:
             last_summary = ""
             changes: List[str] = []
 
+            # Take initial snapshot for unknown-change detection
+            self._take_snapshot_before()
+
             for round_number in range(1, max_rounds + 1):
                 print(f"\n===== دورة الوكيل {round_number}/{max_rounds} =====")
+
+                # Check wall-clock timeout
+                if self._check_timeout():
+                    print("\nانتهت مهلة المهمة؛ سينتقل إلى FAILED.")
+                    self.evidence.save()
+                    if self.fsm.can_transition(State.FAILED):
+                        self.fsm.transition(State.FAILED)
+                    elif self.fsm.can_transition(State.REJECTED):
+                        self.fsm.transition(State.REJECTED)
+                    return AgentResult(
+                        ok=False,
+                        state=self.fsm.state.name,
+                        summary=last_summary,
+                        changes=changes,
+                        verification=failures,
+                        evidence=[item.to_dict() for item in self.evidence.get_all()],
+                        error="Timeout: wall-clock budget exceeded",
+                    )
+
                 if self.fsm.state == State.PLANNING:
                     plan = self._ask(task, files, failures)
                     last_summary = plan.summary
@@ -249,6 +412,14 @@ class NabdAgent:
                             task_id=self.task_id,
                             relevant=call.name in {"write_file", "read_file", "search", "run_command"},
                         )
+                # Track changed files
+                for result in action_results:
+                    if result.ok and result.name == "write_file":
+                        # Extract path from the tool call
+                        for call in plan.tool_calls:
+                            if call.name == "write_file" and call.arguments.get("path"):
+                                self._changed_files.append(str(call.arguments["path"]))
+                                break
                 changes.extend(result.output for result in action_results if result.ok and result.name == "write_file")
                 policy_failures = [
                     result
@@ -258,9 +429,6 @@ class NabdAgent:
                 ]
                 self.fsm.transition(State.VERIFYING)
                 if policy_failures:
-                    # A blocked mutation is not a verification failure that a
-                    # shell command can override. Re-plan instead of allowing
-                    # unrelated successful verification to prove completion.
                     failures = policy_failures
                     print("\nتم حجب تغيير خارج نطاق المهمة؛ سيعيد الوكيل التخطيط.")
                     self.fsm.transition(State.EXECUTING)
@@ -268,18 +436,17 @@ class NabdAgent:
 
                 verification_calls = [ToolCall("run_command", {"command": command}) for command in plan.verification]
                 verification = self._run_calls(verification_calls)
-                for command, result in zip(plan.verification, verification):
-                    if result.raw_facts is not None:
-                        self.evidence.verify(
-                            result.raw_facts,
-                            claim=f"verification: {command}",
-                            task_id=self.task_id,
-                            relevant=result.ok,
-                        )
-                failures = [result for result in verification if not result.ok]
-                if not failures and verification and self.evidence.is_usable_for_completion(self.task_id):
+                self._record_verification_evidence(verification, plan)
+
+                # Use the Verification Gate for decision
+                report = self._run_with_gate(task, plan, action_results, verification)
+
+                print(f"\n[بوابة التحقق] القرار: {report.decision.value}")
+                print(f"  {report.summary}")
+
+                if report.decision == Decision.PASS:
                     self.evidence.save()
-                    self.fsm.complete(self.evidence.is_usable_for_completion(self.task_id))
+                    self.fsm.complete(True)
                     return AgentResult(
                         ok=True,
                         state=self.fsm.state.name,
@@ -289,11 +456,99 @@ class NabdAgent:
                         evidence=[item.to_dict() for item in self.evidence.get_all()],
                     )
 
-                print("\nتعذر اجتياز التحقق؛ سيحاول الوكيل إصلاح الأخطاء.")
+                if report.decision == Decision.BLOCKED:
+                    print("\nتم حجب المهمة بسبب تغييرات خارجية أو دليل مفقود.")
+                    self.evidence.save()
+                    if self.fsm.can_transition(State.FAILED):
+                        self.fsm.transition(State.FAILED)
+                    elif self.fsm.can_transition(State.REJECTED):
+                        self.fsm.transition(State.REJECTED)
+                    return AgentResult(
+                        ok=False,
+                        state=self.fsm.state.name,
+                        summary=last_summary,
+                        changes=changes,
+                        verification=verification,
+                        evidence=[item.to_dict() for item in self.evidence.get_all()],
+                        error=f"Blocked: {report.summary}",
+                    )
+
+                if report.decision == Decision.ROLLBACK:
+                    print("\nفشل غير قابل للإصلاح؛ سينتقل إلى ROLLED_BACK.")
+                    self.evidence.save()
+                    if self.fsm.can_transition(State.ROLLED_BACK):
+                        self.fsm.transition(State.ROLLED_BACK)
+                    elif self.fsm.can_transition(State.REJECTED):
+                        self.fsm.transition(State.REJECTED)
+                    return AgentResult(
+                        ok=False,
+                        state=self.fsm.state.name,
+                        summary=last_summary,
+                        changes=changes,
+                        verification=verification,
+                        evidence=[item.to_dict() for item in self.evidence.get_all()],
+                        error=f"Rolled back: {report.summary}",
+                    )
+
+                if report.decision == Decision.TIMEOUT:
+                    print("\nانتهت مهلة الخطوة.")
+                    self.evidence.save()
+                    if self.fsm.can_transition(State.FAILED):
+                        self.fsm.transition(State.FAILED)
+                    elif self.fsm.can_transition(State.REJECTED):
+                        self.fsm.transition(State.REJECTED)
+                    return AgentResult(
+                        ok=False,
+                        state=self.fsm.state.name,
+                        summary=last_summary,
+                        changes=changes,
+                        verification=verification,
+                        evidence=[item.to_dict() for item in self.evidence.get_all()],
+                        error=f"Timeout: {report.summary}",
+                    )
+
+                # REPAIR: track failure signature and repair count
+                self._repair_count += 1
+                current_sig = FailureSignature.from_report(report, self._changed_files)
+                if (
+                    self._last_failure_signature is not None
+                    and current_sig.signature == self._last_failure_signature.signature
+                    and current_sig.file_set == self._last_failure_signature.file_set
+                ):
+                    current_sig.no_improvement_streak = (
+                        self._last_failure_signature.no_improvement_streak + 1
+                    )
+                self._last_failure_signature = current_sig
+
+                # Check no-improvement streak (2+ identical failures -> ROLLBACK)
+                if current_sig.no_improvement_streak >= 2:
+                    print("\nفشل متكرر بلا تحسن؛ سينتقل إلى ROLLED_BACK.")
+                    self.evidence.save()
+                    if self.fsm.can_transition(State.ROLLED_BACK):
+                        self.fsm.transition(State.ROLLED_BACK)
+                    elif self.fsm.can_transition(State.REJECTED):
+                        self.fsm.transition(State.REJECTED)
+                    return AgentResult(
+                        ok=False,
+                        state=self.fsm.state.name,
+                        summary=last_summary,
+                        changes=changes,
+                        verification=verification,
+                        evidence=[item.to_dict() for item in self.evidence.get_all()],
+                        error=f"Rolled back: repeated failure with no improvement",
+                    )
+
+                # Transition to REPAIRING then back to EXECUTING
+                if self.fsm.can_transition(State.REPAIRING):
+                    self.fsm.transition(State.REPAIRING)
+                print(f"\nتعذر اجتياز التحقق (محاولة إصلاح {self._repair_count}/{3})")
+                failures = [result for result in verification if not result.ok]
                 self.fsm.transition(State.EXECUTING)
 
+            # Max rounds exhausted
             self.evidence.save()
-            self.fsm.transition(State.REJECTED)
+            if self.fsm.can_transition(State.REJECTED):
+                self.fsm.transition(State.REJECTED)
             return AgentResult(
                 ok=False,
                 state=self.fsm.state.name,

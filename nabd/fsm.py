@@ -1,8 +1,15 @@
-"""Finite State Machine for Nabd Agent V2.
+"""Finite State Machine for Nabd Agent V3.
 
-States: PLANNING -> EXECUTING -> VERIFYING -> COMPLETED
-Terminal states: COMPLETED, REJECTED.
-Planning cannot skip verification.
+States:
+  PLANNING -> EXECUTING -> VERIFYING -> COMPLETED
+                                  |-> REPAIRING -> EXECUTING (loop)
+                                  |-> ROLLED_BACK (terminal)
+                                  |-> FAILED (terminal)
+Terminal states: COMPLETED, REJECTED, ROLLED_BACK, FAILED.
+
+Planning cannot skip verification.  REPAIRING allows bounded retry
+loops.  ROLLED_BACK and FAILED are absorbing states that prevent any
+further tool calls.
 """
 
 from enum import Enum, auto
@@ -15,14 +22,27 @@ class State(Enum):
     VERIFYING = auto()
     COMPLETED = auto()
     REJECTED = auto()
+    REPAIRING = auto()
+    ROLLED_BACK = auto()
+    FAILED = auto()
 
 
 ALLOWED_TRANSITIONS: Dict[State, Set[State]] = {
     State.PLANNING: {State.EXECUTING, State.REJECTED},
     State.EXECUTING: {State.VERIFYING, State.REJECTED},
-    State.VERIFYING: {State.COMPLETED, State.EXECUTING, State.REJECTED},
+    State.VERIFYING: {
+        State.COMPLETED,
+        State.EXECUTING,       # implicit repair loop (legacy)
+        State.REPAIRING,       # explicit repair with budget tracking
+        State.ROLLED_BACK,     # irreparable failure
+        State.FAILED,          # timeout or blocked
+        State.REJECTED,
+    },
+    State.REPAIRING: {State.EXECUTING, State.ROLLED_BACK, State.REJECTED},
     State.COMPLETED: set(),
     State.REJECTED: set(),
+    State.ROLLED_BACK: set(),
+    State.FAILED: set(),
 }
 
 
@@ -55,7 +75,12 @@ class FSM:
         self.transition(State.COMPLETED)
 
     def is_terminal(self) -> bool:
-        return self.state in (State.COMPLETED, State.REJECTED)
+        return self.state in (
+            State.COMPLETED,
+            State.REJECTED,
+            State.ROLLED_BACK,
+            State.FAILED,
+        )
 
     def allowed_next(self) -> Set[State]:
         return set(ALLOWED_TRANSITIONS[self.state])

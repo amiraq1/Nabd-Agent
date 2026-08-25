@@ -1,0 +1,423 @@
+[1mdiff --git a/README.md b/README.md[m
+[1mindex d8aff68..0197e3d 100644[m
+[1m--- a/README.md[m
+[1m+++ b/README.md[m
+[36m@@ -93,6 +93,14 @@[m [mnabd "نفّذ الإصلاحات والاختبارات دون طلب مواف[m
+ nabd "أصلح جميع الاختبارات الفاشلة" --max-rounds 3[m
+ ```[m
+ [m
+[32m+[m[32m## سياسة نطاق المهمة[m
+[32m+[m
+[32m+[m[32mقبل أن يطلب الوكيل خطة من النموذج، يصنف نص المهمة إلى نطاقين. مهام الفحص والملخص والتدقيق مثل `inspect` و`audit` و`summarize` و`افحص` و`ملخص` تُصنف `READ_ONLY`. أما المهام التي تتضمن إنشاء أو كتابة أو تعديل أو إصلاح أو حذف مثل `create` و`write` و`fix` و`أنشئ` و`عدّل` فتُصنف `MUTATING`. عند وجود مؤشرات من النوعين معًا، تنتصر `MUTATING` لأن طلب الإصلاح الصريح لا ينبغي أن يُحجب بسبب كلمة فحص.[m
+[32m+[m
+[32m+[m[32mفي `READ_ONLY` يمنع `ToolExecutor` عملية `write_file` قبل الوصول إلى filesystem، ويعيد `ToolResult` فاشلًا مع RawFacts منظم يحمل `status=MUTATION_NOT_ALLOWED`. كما يسمح فقط بمجموعة محافظة من أوامر Shell الاستطلاعية الخالية من pipe وredirection وcommand substitution؛ أي أمر غير معروف أو قابل للتغيير يُحجب. لا يمنح نجاح أمر تحقق غير مرتبط صلاحية تجاوز هذا الحاجز، ولا يسمح بإعلان `COMPLETED` بعد محاولة تغيير محجوبة.[m
+[32m+[m
+[32m+[m[32mالمهام غير المعروفة تُصنف `MUTATING` حتى لا يمنع التصنيف التخمينِي مهمة إصلاح صحيحة. التنفيذ التلقائي الافتراضي لا يلغي هذه السياسة؛ فهو يزيل موافقة المستخدم التفاعلية فقط، بينما تبقى سياسة النطاق وWorkspaceJail وEvidenceStore وFSM إلزامية.[m
+[32m+[m
+ ## سجل الأدلة[m
+ [m
+ يستخدم الوكيل `EvidenceStore v2`. الأدلة من نوع `OBSERVED` تُسجل فقط بعد تحقق فعلي: وجود الملف على القرص مع بصمة SHA-256، أو نجاح أمر تحقق بخروج يساوي صفرًا. أما المعلومات التي ينتجها النموذج فتظل توجيهًا تخطيطيًا ولا تكفي وحدها لإعلان النجاح. يعيد `is_usable_for_completion()` التحقق من الأدلة الحالية، بينما لا تمنع محاولات فاشلة سابقة إصلاحًا لاحقًا داخل نفس المهمة إذا ظهرت أدلة جديدة صالحة. يُحفظ السجل محليًا في `.nabd/evidence.json` وهو متجاهل في Git افتراضيًا.[m
+[36m@@ -111,9 +119,9 @@[m [mpython3 -m compileall -q nabd[m
+ | الملف | الغرض |[m
+ | --- | --- |[m
+ | `nabd/fsm.py` | آلة الحالات المستوحاة من الملف المشارك. |[m
+[31m-| `nabd/agent.py` | حلقة التخطيط والتنفيذ والتحقق والإصلاح، وتطهير بادئات `run_command` الوهمية قبل تنفيذ التحقق. |[m
+[32m+[m[32m| `nabd/agent.py` | حلقة التخطيط والتنفيذ والتحقق والإصلاح، وتصنيف نطاق المهمة وتطهير بادئات `run_command` الوهمية قبل تنفيذ التحقق. |[m
+ | `nabd/llm.py` | اتصال OpenAI وGemini باستخدام HTTP ومكتبات Python القياسية. |[m
+[31m-| `nabd/tools.py` | طبقة تحويل ToolCall إلى ToolResult يحمل RawFacts، دون إصدار Evidence من الأداة. |[m
+[32m+[m[32m| `nabd/tools.py` | طبقة تحويل ToolCall إلى ToolResult يحمل RawFacts، وتطبيق Mutation Policy قبل تنفيذ الكتابة أو أوامر Shell غير الآمنة للقراءة. |[m
+ | `nabd/write_tool.py` | أداة كتابة تعيد RawFacts عن الملف والنسخة الاحتياطية؛ لا تصدر Evidence. |[m
+ | `nabd/read_tool.py` | أداة قراءة تعيد RawFacts بالمحتوى والهاش وبيانات truncation. |[m
+ | `nabd/list_tool.py` | أداة سرد تعيد files/count/truncated داخل RawFacts بحد 200 ملف، وتتجاهل `.nabd` وآثار التشغيل. |[m
+[1mdiff --git a/nabd/agent.py b/nabd/agent.py[m
+[1mindex 666e9ef..cb787b8 100644[m
+[1m--- a/nabd/agent.py[m
+[1m+++ b/nabd/agent.py[m
+[36m@@ -52,6 +52,61 @@[m [mBLOCKED_VERIFICATION = frozenset([m
+ )[m
+ [m
+ [m
+[32m+[m[32mREAD_ONLY_KEYWORDS = frozenset([m
+[32m+[m[32m    {[m
+[32m+[m[32m        "افحص",[m
+[32m+[m[32m        "فحص",[m
+[32m+[m[32m        "ملخص",[m
+[32m+[m[32m        "تلخيص",[m
+[32m+[m[32m        "تقرير",[m
+[32m+[m[32m        "اقرأ",[m
+[32m+[m[32m        "قراءة",[m
+[32m+[m[32m        "جرد",[m
+[32m+[m[32m        "audit",[m
+[32m+[m[32m        "inspect",[m
+[32m+[m[32m        "summarize",[m
+[32m+[m[32m        "summary",[m
+[32m+[m[32m        "report",[m
+[32m+[m[32m        "review",[m
+[32m+[m[32m        "list",[m
+[32m+[m[32m    }[m
+[32m+[m[32m)[m
+[32m+[m
+[32m+[m[32mMUTATING_KEYWORDS = frozenset([m
+[32m+[m[32m    {[m
+[32m+[m[32m        "أنشئ",[m
+[32m+[m[32m        "انشئ",[m
+[32m+[m[32m        "اكتب",[m
+[32m+[m[32m        "عدّل",[m
+[32m+[m[32m        "عدل",[m
+[32m+[m[32m        "أصلح",[m
+[32m+[m[32m        "اصلح",[m
+[32m+[m[32m        "احذف",[m
+[32m+[m[32m        "حذف",[m
+[32m+[m[32m        "غيّر",[m
+[32m+[m[32m        "غير",[m
+[32m+[m[32m        "create",[m
+[32m+[m[32m        "write",[m
+[32m+[m[32m        "edit",[m
+[32m+[m[32m        "fix",[m
+[32m+[m[32m        "refactor",[m
+[32m+[m[32m        "modify",[m
+[32m+[m[32m        "delete",[m
+[32m+[m[32m        "remove",[m
+[32m+[m[32m    }[m
+[32m+[m[32m)[m
+[32m+[m
+[32m+[m
+[32m+[m[32mdef classify_intent(task: str) -> str:[m
+[32m+[m[32m    """Classify task scope before planning; unknown tasks remain mutating."""[m
+[32m+[m[32m    text = " ".join(str(task).lower().split())[m
+[32m+[m[32m    if any(keyword in text for keyword in MUTATING_KEYWORDS):[m
+[32m+[m[32m        return "MUTATING"[m
+[32m+[m[32m    if any(keyword in text for keyword in READ_ONLY_KEYWORDS):[m
+[32m+[m[32m        return "READ_ONLY"[m
+[32m+[m[32m    return "MUTATING"[m
+[32m+[m
+[32m+[m
+ def _sanitize_verification(commands: Any) -> List[str]:[m
+     """Strip hallucinated tool-name prefixes from the verification list.[m
+ [m
+[36m@@ -119,6 +174,7 @@[m [mclass NabdAgent:[m
+         self.fsm = FSM()[m
+         self.history: List[ToolResult] = [][m
+         self.auto_approve = auto_approve[m
+[32m+[m[32m        self.intent = "MUTATING"[m
+         self.task_id = EvidenceStore.new_task_id()[m
+         self.evidence = EvidenceStore(root, task_id=self.task_id)[m
+         self.executor = ToolExecutor([m
+[36m@@ -153,6 +209,8 @@[m [mclass NabdAgent:[m
+ [m
+     def run(self, task: str, max_rounds: int = 5) -> AgentResult:[m
+         try:[m
+[32m+[m[32m            self.intent = classify_intent(task)[m
+[32m+[m[32m            self.executor.set_intent(self.intent)[m
+             inventory = self.executor.execute(ToolCall("list_files", {"path": "."}))[m
+             self.history.append(inventory)[m
+             files = inventory.output[m
+[36m@@ -185,7 +243,21 @@[m [mclass NabdAgent:[m
+                             relevant=call.name in {"write_file", "read_file", "search", "run_command"},[m
+                         )[m
+                 changes.extend(result.output for result in action_results if result.ok and result.name == "write_file")[m
+[32m+[m[32m                policy_failures = [[m
+[32m+[m[32m                    result[m
+[32m+[m[32m                    for result in action_results[m
+[32m+[m[32m                    if result.raw_facts is not None[m
+[32m+[m[32m                    and result.raw_facts.status == "MUTATION_NOT_ALLOWED"[m
+[32m+[m[32m                ][m
+                 self.fsm.transition(State.VERIFYING)[m
+[32m+[m[32m                if policy_failures:[m
+[32m+[m[32m                    # A blocked mutation is not a verification failure that a[m
+[32m+[m[32m                    # shell command can override. Re-plan instead of allowing[m
+[32m+[m[32m                    # unrelated successful verification to prove completion.[m
+[32m+[m[32m                    failures = policy_failures[m
+[32m+[m[32m                    print("\nتم حجب تغيير خارج نطاق المهمة؛ سيعيد الوكيل التخطيط.")[m
+[32m+[m[32m                    self.fsm.transition(State.EXECUTING)[m
+[32m+[m[32m                    continue[m
+ [m
+                 verification_calls = [ToolCall("run_command", {"command": command}) for command in plan.verification][m
+                 verification = self._run_calls(verification_calls)[m
+[1mdiff --git a/nabd/tools.py b/nabd/tools.py[m
+[1mindex 90a212d..59eba32 100644[m
+[1m--- a/nabd/tools.py[m
+[1m+++ b/nabd/tools.py[m
+[36m@@ -3,6 +3,7 @@[m
+ from __future__ import annotations[m
+ [m
+ from pathlib import Path[m
+[32m+[m[32mimport shlex[m
+ from typing import Callable, Optional[m
+ [m
+ from .models import ToolCall, ToolResult[m
+[36m@@ -20,6 +21,59 @@[m [mclass ToolError(RuntimeError):[m
+     """Raised for invalid tool requests or approval rejection."""[m
+ [m
+ [m
+[32m+[m[32m_READ_ONLY_SHELL_COMMANDS = frozenset([m
+[32m+[m[32m    {[m
+[32m+[m[32m        "cat",[m
+[32m+[m[32m        "command",[m
+[32m+[m[32m        "file",[m
+[32m+[m[32m        "find",[m
+[32m+[m[32m        "grep",[m
+[32m+[m[32m        "head",[m
+[32m+[m[32m        "ls",[m
+[32m+[m[32m        "pwd",[m
+[32m+[m[32m        "rg",[m
+[32m+[m[32m        "sha256sum",[m
+[32m+[m[32m        "stat",[m
+[32m+[m[32m        "tail",[m
+[32m+[m[32m        "type",[m
+[32m+[m[32m        "which",[m
+[32m+[m[32m        "wc",[m
+[32m+[m[32m    }[m
+[32m+[m[32m)[m
+[32m+[m[32m_READ_ONLY_GIT_COMMANDS = frozenset([m
+[32m+[m[32m    {"branch", "diff", "log", "ls-files", "rev-parse", "show", "status"}[m
+[32m+[m[32m)[m
+[32m+[m[32m_FIND_MUTATING_OPTIONS = frozenset([m
+[32m+[m[32m    {"-delete", "-exec", "-execdir", "-ok", "-okdir", "-fprint", "-fprintf", "-fls"}[m
+[32m+[m[32m)[m
+[32m+[m
+[32m+[m
+[32m+[m[32mdef is_read_only_shell_command(command: str) -> bool:[m
+[32m+[m[32m    """Return true only for a conservative, operator-free inspection command."""[m
+[32m+[m[32m    if not isinstance(command, str) or not command.strip():[m
+[32m+[m[32m        return False[m
+[32m+[m[32m    if any(operator in command for operator in (";", "|", "&", ">", "`", "$(", "\\")):[m
+[32m+[m[32m        return False[m
+[32m+[m[32m    try:[m
+[32m+[m[32m        tokens = shlex.split(command)[m
+[32m+[m[32m    except ValueError:[m
+[32m+[m[32m        return False[m
+[32m+[m[32m    if not tokens:[m
+[32m+[m[32m        return False[m
+[32m+[m[32m    executable = Path(tokens[0]).name[m
+[32m+[m[32m    if executable == "git":[m
+[32m+[m[32m        if len(tokens) < 2 or tokens[1] not in _READ_ONLY_GIT_COMMANDS:[m
+[32m+[m[32m            return False[m
+[32m+[m[32m        if tokens[1] == "status":[m
+[32m+[m[32m            return "--no-optional-locks" in tokens[2:][m
+[32m+[m[32m        return True[m
+[32m+[m[32m    if executable not in _READ_ONLY_SHELL_COMMANDS:[m
+[32m+[m[32m        return False[m
+[32m+[m[32m    if executable == "find" and any(token in _FIND_MUTATING_OPTIONS for token in tokens[1:]):[m
+[32m+[m[32m        return False[m
+[32m+[m[32m    return True[m
+[32m+[m
+[32m+[m
+ class ToolExecutor:[m
+     def __init__([m
+         self,[m
+[36m@@ -35,17 +89,31 @@[m [mclass ToolExecutor:[m
+         self.auto_approve = auto_approve[m
+         self.command_timeout = command_timeout[m
+         self.evidence = evidence_store[m
+[32m+[m[32m        self.intent = "MUTATING"[m
+         self.writer = WriteTool(self.root)[m
+         self.reader = ReadTool(self.root)[m
+         self.lister = ListTool(self.root)[m
+         self.searcher = SearchTool(self.root)[m
+         self.shell = ShellTool(self.root, timeout=command_timeout)[m
+ [m
+[32m+[m[32m    def set_intent(self, intent: str) -> None:[m
+[32m+[m[32m        if intent not in {"READ_ONLY", "MUTATING"}:[m
+[32m+[m[32m            raise ValueError(f"Unknown task intent: {intent}")[m
+[32m+[m[32m        self.intent = intent[m
+[32m+[m
+     def execute(self, call: ToolCall) -> ToolResult:[m
+         try:[m
+             allowed = {"list_files", "read_file", "write_file", "search", "run_command"}[m
+             if call.name not in allowed:[m
+                 raise ToolError(f"Unknown tool: {call.name}")[m
+[32m+[m[32m            if self.intent == "READ_ONLY" and ([m
+[32m+[m[32m                call.name == "write_file"[m
+[32m+[m[32m                or ([m
+[32m+[m[32m                    call.name == "run_command"[m
+[32m+[m[32m                    and not is_read_only_shell_command(str(call.arguments.get("command", "")))[m
+[32m+[m[32m                )[m
+[32m+[m[32m            ):[m
+[32m+[m[32m                return self._mutation_denied(call)[m
+             if call.name in {"write_file", "search", "run_command"} and not self._approved(call):[m
+                 return ToolResult(call.name, False, "Action rejected by user", 126)[m
+             raw = self._dispatch(call)[m
+[36m@@ -76,6 +144,26 @@[m [mclass ToolExecutor:[m
+             )[m
+         return self.shell.run(str(args.get("command", "")))[m
+ [m
+[32m+[m[32m    @staticmethod[m
+[32m+[m[32m    def _mutation_denied(call: ToolCall) -> ToolResult:[m
+[32m+[m[32m        message = f"MUTATION_NOT_ALLOWED: task is READ_ONLY; {call.name} was blocked"[m
+[32m+[m[32m        is_shell = call.name == "run_command"[m
+[32m+[m[32m        raw = RawFacts([m
+[32m+[m[32m            operation="shell" if is_shell else "write",[m
+[32m+[m[32m            path=None if is_shell else str(call.arguments.get("path", "")) or None,[m
+[32m+[m[32m            status="MUTATION_NOT_ALLOWED",[m
+[32m+[m[32m            exit_code=126,[m
+[32m+[m[32m            error=message,[m
+[32m+[m[32m            details={[m
+[32m+[m[32m                "policy": "mutation",[m
+[32m+[m[32m                "intent": "READ_ONLY",[m
+[32m+[m[32m                "tool": call.name,[m
+[32m+[m[32m                "command": str(call.arguments.get("command", "")) if is_shell else None,[m
+[32m+[m[32m                "reason": "read-only task cannot mutate workspace",[m
+[32m+[m[32m            },[m
+[32m+[m[32m        )[m
+[32m+[m[32m        return ToolResult(call.name, False, message, 126, raw)[m
+[32m+[m
+     @staticmethod[m
+     def _result(name: str, raw: RawFacts) -> ToolResult:[m
+         if raw.operation == "write":[m
+[1mdiff --git a/tests/test_mutation_policy.py b/tests/test_mutation_policy.py[m
+[1mnew file mode 100644[m
+[1mindex 0000000..9de1236[m
+[1m--- /dev/null[m
+[1m+++ b/tests/test_mutation_policy.py[m
+[36m@@ -0,0 +1,150 @@[m
+[32m+[m[32mimport tempfile[m
+[32m+[m[32mimport unittest[m
+[32m+[m[32mfrom pathlib import Path[m
+[32m+[m
+[32m+[m[32mfrom nabd.agent import NabdAgent, classify_intent[m
+[32m+[m[32mfrom nabd.models import ToolCall[m
+[32m+[m[32mfrom nabd.raw_facts import RawFacts[m
+[32m+[m[32mfrom nabd.tools import ToolExecutor, is_read_only_shell_command[m
+[32m+[m
+[32m+[m
+[32m+[m[32mclass ReadOnlyWriteClient:[m
+[32m+[m[32m    provider = "fake"[m
+[32m+[m[32m    model = "test"[m
+[32m+[m
+[32m+[m[32m    def complete_json(self, _system, _user):[m
+[32m+[m[32m        return {[m
+[32m+[m[32m            "summary": "فحص المستودع وتقديم ملخص",[m
+[32m+[m[32m            "steps": ["إنشاء README للملخص"],[m
+[32m+[m[32m            "actions": [[m
+[32m+[m[32m                {[m
+[32m+[m[32m                    "name": "write_file",[m
+[32m+[m[32m                    "arguments": {"path": "README.md", "content": "must not be written"},[m
+[32m+[m[32m                }[m
+[32m+[m[32m            ],[m
+[32m+[m[32m            "verification": ["python3 -c 'print(\"unrelated success\")'"],[m
+[32m+[m[32m        }[m
+[32m+[m
+[32m+[m
+[32m+[m[32mclass MutationPolicyTests(unittest.TestCase):[m
+[32m+[m[32m    def test_read_only_keywords_are_classified_read_only(self):[m
+[32m+[m[32m        self.assertEqual(classify_intent("افحص المستودع واعطني ملخص"), "READ_ONLY")[m
+[32m+[m[32m        self.assertEqual(classify_intent("inspect the repository and report"), "READ_ONLY")[m
+[32m+[m
+[32m+[m[32m    def test_mutating_keyword_wins_over_read_only_keyword(self):[m
+[32m+[m[32m        self.assertEqual(classify_intent("افحص ثم أصلح الخطأ"), "MUTATING")[m
+[32m+[m[32m        self.assertEqual(classify_intent("inspect and fix the failing test"), "MUTATING")[m
+[32m+[m
+[32m+[m[32m    def test_unknown_intent_defaults_to_mutating(self):[m
+[32m+[m[32m        self.assertEqual(classify_intent("نفذ المهمة المطلوبة"), "MUTATING")[m
+[32m+[m
+[32m+[m[32m    def test_read_only_write_is_structured_policy_failure(self):[m
+[32m+[m[32m        with tempfile.TemporaryDirectory() as directory:[m
+[32m+[m[32m            root = Path(directory)[m
+[32m+[m[32m            executor = ToolExecutor(root, auto_approve=True)[m
+[32m+[m[32m            executor.set_intent("READ_ONLY")[m
+[32m+[m
+[32m+[m[32m            result = executor.execute([m
+[32m+[m[32m                ToolCall([m
+[32m+[m[32m                    "write_file",[m
+[32m+[m[32m                    {"path": "README.md", "content": "must not be written"},[m
+[32m+[m[32m                )[m
+[32m+[m[32m            )[m
+[32m+[m
+[32m+[m[32m            self.assertFalse(result.ok)[m
+[32m+[m[32m            self.assertEqual(result.exit_code, 126)[m
+[32m+[m[32m            self.assertIn("MUTATION_NOT_ALLOWED", result.output)[m
+[32m+[m[32m            self.assertIsInstance(result.raw_facts, RawFacts)[m
+[32m+[m[32m            self.assertEqual(result.raw_facts.status, "MUTATION_NOT_ALLOWED")[m
+[32m+[m[32m            self.assertEqual(result.raw_facts.details["intent"], "READ_ONLY")[m
+[32m+[m[32m            self.assertFalse((root / "README.md").exists())[m
+[32m+[m
+[32m+[m[32m    def test_read_only_shell_classifier_is_conservative(self):[m
+[32m+[m[32m        self.assertTrue(is_read_only_shell_command("pwd"))[m
+[32m+[m[32m        self.assertTrue(is_read_only_shell_command("git status --short --no-optional-locks"))[m
+[32m+[m[32m        self.assertFalse(is_read_only_shell_command("git status --short"))[m
+[32m+[m[32m        self.assertFalse(is_read_only_shell_command("echo x > output.txt"))[m
+[32m+[m[32m        self.assertFalse(is_read_only_shell_command("python3 -c 'open(\"x\", \"w\").write(\"x\")'"))[m
+[32m+[m[32m        self.assertFalse(is_read_only_shell_command("find . -delete"))[m
+[32m+[m
+[32m+[m[32m    def test_read_only_shell_mutation_is_blocked_without_execution(self):[m
+[32m+[m[32m        with tempfile.TemporaryDirectory() as directory:[m
+[32m+[m[32m            root = Path(directory)[m
+[32m+[m[32m            executor = ToolExecutor(root, auto_approve=True)[m
+[32m+[m[32m            executor.set_intent("READ_ONLY")[m
+[32m+[m
+[32m+[m[32m            result = executor.execute([m
+[32m+[m[32m                ToolCall([m
+[32m+[m[32m                    "run_command",[m
+[32m+[m[32m                    {"command": "python3 -c 'open(\"created.txt\", \"w\").write(\"bad\")'"},[m
+[32m+[m[32m                )[m
+[32m+[m[32m            )[m
+[32m+[m
+[32m+[m[32m            self.assertFalse(result.ok)[m
+[32m+[m[32m            self.assertEqual(result.exit_code, 126)[m
+[32m+[m[32m            self.assertIn("MUTATION_NOT_ALLOWED", result.output)[m
+[32m+[m[32m            self.assertIsInstance(result.raw_facts, RawFacts)[m
+[32m+[m[32m            self.assertEqual(result.raw_facts.operation, "shell")[m
+[32m+[m[32m            self.assertFalse((root / "created.txt").exists())[m
+[32m+[m
+[32m+[m[32m    def test_read_only_inspection_shell_is_allowed(self):[m
+[32m+[m[32m        with tempfile.TemporaryDirectory() as directory:[m
+[32m+[m[32m            root = Path(directory)[m
+[32m+[m[32m            executor = ToolExecutor(root, auto_approve=True)[m
+[32m+[m[32m            executor.set_intent("READ_ONLY")[m
+[32m+[m[32m            result = executor.execute(ToolCall("run_command", {"command": "pwd"}))[m
+[32m+[m[32m            self.assertTrue(result.ok)[m
+[32m+[m[32m            self.assertIn(str(root), result.output)[m
+[32m+[m
+[32m+[m[32m    def test_mutating_task_can_run_mutating_shell_when_auto_approved(self):[m
+[32m+[m[32m        with tempfile.TemporaryDirectory() as directory:[m
+[32m+[m[32m            root = Path(directory)[m
+[32m+[m[32m            executor = ToolExecutor(root, auto_approve=True)[m
+[32m+[m[32m            executor.set_intent("MUTATING")[m
+[32m+[m[32m            result = executor.execute([m
+[32m+[m[32m                ToolCall([m
+[32m+[m[32m                    "run_command",[m
+[32m+[m[32m                    {"command": "python3 -c 'open(\"created.txt\", \"w\").write(\"ok\")'"},[m
+[32m+[m[32m                )[m
+[32m+[m[32m            )[m
+[32m+[m[32m            self.assertTrue(result.ok)[m
+[32m+[m[32m            self.assertEqual((root / "created.txt").read_text(encoding="utf-8"), "ok")[m
+[32m+[m
+[32m+[m[32m    def test_mutating_task_can_write_when_auto_approved(self):[m
+[32m+[m[32m        with tempfile.TemporaryDirectory() as directory:[m
+[32m+[m[32m            root = Path(directory)[m
+[32m+[m[32m            executor = ToolExecutor(root, auto_approve=True)[m
+[32m+[m[32m            executor.set_intent("MUTATING")[m
+[32m+[m
+[32m+[m[32m            result = executor.execute([m
+[32m+[m[32m                ToolCall([m
+[32m+[m[32m                    "write_file",[m
+[32m+[m[32m                    {"path": "README.md", "content": "allowed"},[m
+[32m+[m[32m                )[m
+[32m+[m[32m            )[m
+[32m+[m
+[32m+[m[32m            self.assertTrue(result.ok)[m
+[32m+[m[32m            self.assertEqual((root / "README.md").read_text(encoding="utf-8"), "allowed")[m
+[32m+[m
+[32m+[m[32m    def test_agent_read_only_policy_blocks_write_before_verification(self):[m
+[32m+[m[32m        with tempfile.TemporaryDirectory() as directory:[m
+[32m+[m[32m            root = Path(directory)[m
+[32m+[m[32m            agent = NabdAgent(root, auto_approve=True)[m
+[32m+[m[32m            agent.client = ReadOnlyWriteClient()[m
+[32m+[m
+[32m+[m[32m            result = agent.run("افحص المستودع واعطني ملخص", max_rounds=1)[m
+[32m+[m
+[32m+[m[32m            self.assertFalse(result.ok)[m
+[32m+[m[32m            self.assertEqual(result.state, "REJECTED")[m
+[32m+[m[32m            self.assertFalse((root / "README.md").exists())[m
+[32m+[m[32m            self.assertTrue(any(item["details"].get("intent") == "READ_ONLY" for item in result.evidence))[m
+[32m+[m
+[32m+[m[32m    def test_invalid_intent_is_rejected(self):[m
+[32m+[m[32m        with tempfile.TemporaryDirectory() as directory:[m
+[32m+[m[32m            executor = ToolExecutor(Path(directory), auto_approve=True)[m
+[32m+[m[32m            with self.assertRaises(ValueError):[m
+[32m+[m[32m                executor.set_intent("UNKNOWN")[m
+[32m+[m
+[32m+[m
+[32m+[m[32mif __name__ == "__main__":[m
+[32m+[m[32m    unittest.main()[m
