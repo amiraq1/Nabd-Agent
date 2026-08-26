@@ -26,6 +26,12 @@ class CLITests(unittest.TestCase):
         self.assertFalse(normal.workspace_free)
         self.assertTrue(free.workspace_free)
 
+    def test_rich_ui_is_opt_in(self):
+        normal = build_parser().parse_args(["مهمة تجريبية"])
+        rich = build_parser().parse_args(["مهمة تجريبية", "--rich"])
+        self.assertFalse(normal.rich_ui)
+        self.assertTrue(rich.rich_ui)
+
 
 if __name__ == "__main__":
     unittest.main()
