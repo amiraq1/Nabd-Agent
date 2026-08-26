@@ -9,6 +9,8 @@ the Renderer. Evidence is never created at the boundary.
 
 from __future__ import annotations
 
+import unittest
+
 from nabd.events import EVENT_SCHEMA_VERSION, CapturingEventSink, EventType, build_event
 from nabd.event_contract import (
     EventBoundary,
@@ -139,3 +141,33 @@ def test_validate_event_helper():
     bad = dict(good)
     bad["event_type"] = "NOT_A_REAL_TYPE"
     assert validate_event(bad)  # non-empty list of problems
+
+
+def test_schema_is_closed_and_versioned():
+    good = _valid_event(EventType.TOOL_SUCCEEDED, payload={"tool": "x", "output_excerpt": "y"})
+    extra = dict(good)
+    extra["new_field_without_version"] = True
+    assert any("unknown fields" in problem for problem in validate_event(extra))
+    wrong_version = dict(good)
+    wrong_version["schema_version"] = EVENT_SCHEMA_VERSION + 1
+    assert any("unsupported schema_version" in problem for problem in validate_event(wrong_version))
+
+
+def test_contract_rejects_invalid_core_types_and_negative_sequence():
+    bad = _valid_event(EventType.TOOL_SUCCEEDED, payload={"tool": "x", "output_excerpt": "y"})
+    bad["seq"] = -1
+    bad["attempt_order"] = "first"
+    bad["payload"] = {"tool": "x", "output_excerpt": 123}
+    problems = validate_event(bad)
+    assert any("seq must be non-negative" in problem for problem in problems)
+    assert any("attempt_order must be" in problem for problem in problems)
+    assert any("TOOL_SUCCEEDED.output_excerpt must be str" in problem for problem in problems)
+
+
+def load_tests(loader, _tests, _pattern):
+    """Expose function-style contract tests to the project's unittest runner."""
+    suite = unittest.TestSuite()
+    for name in sorted(globals()):
+        if name.startswith("test_") and callable(globals()[name]):
+            suite.addTest(unittest.FunctionTestCase(globals()[name]))
+    return suite

@@ -45,6 +45,23 @@ KNOWN_FSM_STATES = {
 
 VALID_DECISIONS = {"ROLLBACK", "BLOCKED", "TIMEOUT", "REPAIR"}
 
+# Fields are deliberately closed: adding a field requires a schema-version
+# decision rather than silently changing what Renderers consume.
+FIELD_TYPES = {
+    "schema_version": int,
+    "event_id": str,
+    "event_type": str,
+    "task_id": str,
+    "session_id": str,
+    "attempt_id": (str, type(None)),
+    "attempt_order": int,
+    "seq": int,
+    "evidence_id": (str, type(None)),
+    "fsm_state": (str, type(None)),
+    "source": str,
+    "payload": Mapping,
+}
+
 # Discriminated payload shape: each event type requires its own keys.
 # A payload missing a required key (or with a wrong-typed value) is invalid,
 # which prevents impossible combinations between event types.
@@ -82,20 +99,23 @@ def validate_event(event: Mapping[str, Any]) -> List[str]:
     for field in REQUIRED_FIELDS:
         if field not in event:
             problems.append(f"missing field: {field}")
-    if "schema_version" in event and not isinstance(event["schema_version"], int):
-        problems.append("schema_version must be int")
-    if "event_id" in event and not isinstance(event["event_id"], str):
-        problems.append("event_id must be str")
+    extra_fields = sorted(set(event.keys()) - set(REQUIRED_FIELDS))
+    if extra_fields:
+        problems.append(f"unknown fields: {', '.join(extra_fields)}")
+    for field, expected_type in FIELD_TYPES.items():
+        if field in event and not isinstance(event[field], expected_type):
+            expected_name = getattr(expected_type, "__name__", str(expected_type))
+            problems.append(f"{field} must be {expected_name}")
+    if event.get("schema_version") != EVENT_SCHEMA_VERSION:
+        problems.append(f"unsupported schema_version: {event.get('schema_version')}")
+    for field in ("event_id", "task_id", "session_id", "event_type", "source"):
+        if field in event and isinstance(event[field], str) and not event[field].strip():
+            problems.append(f"{field} must not be empty")
+    for field in ("seq", "attempt_order"):
+        if field in event and isinstance(event[field], int) and event[field] < 0:
+            problems.append(f"{field} must be non-negative")
     if "event_type" in event and event["event_type"] not in VALID_EVENT_TYPES:
         problems.append(f"unknown event_type: {event.get('event_type')}")
-    if "seq" in event and not isinstance(event["seq"], int):
-        problems.append("seq must be int")
-    if "attempt_order" in event and not isinstance(event["attempt_order"], int):
-        problems.append("attempt_order must be int")
-    if "evidence_id" in event and event["evidence_id"] is not None and not isinstance(event["evidence_id"], str):
-        problems.append("evidence_id must be str or None")
-    if "payload" in event and not isinstance(event["payload"], Mapping):
-        problems.append("payload must be a mapping")
     et = event.get("event_type")
     payload = event.get("payload")
     if et in PAYLOAD_SCHEMA and isinstance(payload, Mapping):
@@ -106,6 +126,24 @@ def validate_event(event: Mapping[str, Any]) -> List[str]:
             problems.append("VERIFICATION_FAILED.decision invalid")
         if et == EventType.SNAPSHOT_READY.value and not isinstance(payload.get("files"), int):
             problems.append("SNAPSHOT_READY.files must be int")
+        if et == EventType.PLAN_READY.value:
+            for key in ("summary",):
+                if not isinstance(payload.get(key), str):
+                    problems.append(f"PLAN_READY.{key} must be str")
+            for key in ("steps", "actions", "verification"):
+                if not isinstance(payload.get(key), list):
+                    problems.append(f"PLAN_READY.{key} must be list")
+        if et in {EventType.TOOL_STARTED.value, EventType.TOOL_SUCCEEDED.value, EventType.TOOL_FAILED.value}:
+            if not isinstance(payload.get("tool"), str):
+                problems.append(f"{et}.tool must be str")
+        if et in {EventType.TOOL_SUCCEEDED.value, EventType.TOOL_FAILED.value}:
+            output_key = "output_excerpt" if et == EventType.TOOL_SUCCEEDED.value else "error"
+            if not isinstance(payload.get(output_key), str):
+                problems.append(f"{et}.{output_key} must be str")
+        if et == EventType.VERIFICATION_STARTED.value and not isinstance(payload.get("commands"), list):
+            problems.append("VERIFICATION_STARTED.commands must be list")
+        if et in {EventType.VERIFICATION_PASSED.value, EventType.VERIFICATION_FAILED.value, EventType.ROLLBACK_STARTED.value, EventType.ROLLBACK_COMPLETED.value, EventType.TIMEOUT.value} and not isinstance(payload.get("summary"), str):
+            problems.append(f"{et}.summary must be str")
         if et == EventType.LATE_EVENT.value and not isinstance(payload.get("reason"), str):
             problems.append("LATE_EVENT.reason must be str")
         if et == EventType.EVENT_GAP_DETECTED.value and not isinstance(payload.get("gap"), (list, tuple)):
