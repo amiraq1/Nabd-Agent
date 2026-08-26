@@ -577,6 +577,14 @@ class NabdAgent:
                     attempt_seq=self._attempt_seq,
                 )
 
+    def _report_evidence_ids(self, report: Report) -> List[str]:
+        """Return only evidence IDs already issued by the core EvidenceStore."""
+        return [
+            str(result.evidence_id)
+            for result in report.results
+            if getattr(result, "evidence_id", "")
+        ]
+
     def _run_with_gate(
         self,
         task: str,
@@ -750,30 +758,71 @@ class NabdAgent:
 
                 print(f"\n[بوابة التحقق] القرار: {report.decision.value}")
                 print(f"  {report.summary}")
+                report_evidence_ids = self._report_evidence_ids(report)
+                report_evidence_id = report_evidence_ids[0] if report_evidence_ids else None
+                report_payload = {"summary": report.summary}
+                if report_evidence_ids:
+                    report_payload["evidence_ids"] = report_evidence_ids
 
                 if self._unknown_paths:
                     self._publish(EventType.UNKNOWN_CHANGE_DETECTED, payload={"paths": sorted(self._unknown_paths)})
                 if report.decision == Decision.PASS:
-                    self._publish(EventType.VERIFICATION_PASSED, payload={"summary": report.summary})
+                    self._publish(
+                        EventType.VERIFICATION_PASSED,
+                        evidence_id=report_evidence_id,
+                        payload=report_payload,
+                    )
                 elif report.decision == Decision.ROLLBACK:
-                    self._publish(EventType.VERIFICATION_FAILED, payload={"decision": "ROLLBACK", "summary": report.summary})
-                    self._publish(EventType.ROLLBACK_STARTED, payload={"summary": report.summary})
-                    self._publish(EventType.ROLLBACK_COMPLETED, payload={"summary": report.summary})
-                    self._publish(EventType.TASK_FAILED, payload={"summary": report.summary, "state": self.fsm.state.name, "error": f"Rolled back: {report.summary}"})
+                    self._publish(
+                        EventType.VERIFICATION_FAILED,
+                        evidence_id=report_evidence_id,
+                        payload={"decision": "ROLLBACK", **report_payload},
+                    )
+                    self._publish(EventType.ROLLBACK_STARTED, evidence_id=report_evidence_id, payload=report_payload)
+                    self._publish(EventType.ROLLBACK_COMPLETED, evidence_id=report_evidence_id, payload=report_payload)
+                    self._publish(
+                        EventType.TASK_FAILED,
+                        evidence_id=report_evidence_id,
+                        payload={"state": self.fsm.state.name, "error": f"Rolled back: {report.summary}", **report_payload},
+                    )
                 elif report.decision == Decision.BLOCKED:
-                    self._publish(EventType.VERIFICATION_FAILED, payload={"decision": "BLOCKED", "summary": report.summary})
-                    self._publish(EventType.TASK_FAILED, payload={"summary": report.summary, "state": self.fsm.state.name, "error": f"Blocked: {report.summary}"})
+                    self._publish(
+                        EventType.VERIFICATION_FAILED,
+                        evidence_id=report_evidence_id,
+                        payload={"decision": "BLOCKED", **report_payload},
+                    )
+                    self._publish(
+                        EventType.TASK_FAILED,
+                        evidence_id=report_evidence_id,
+                        payload={"state": self.fsm.state.name, "error": f"Blocked: {report.summary}", **report_payload},
+                    )
                 elif report.decision == Decision.TIMEOUT:
-                    self._publish(EventType.VERIFICATION_FAILED, payload={"decision": "TIMEOUT", "summary": report.summary})
-                    self._publish(EventType.TIMEOUT, payload={"summary": report.summary})
-                    self._publish(EventType.TASK_FAILED, payload={"summary": report.summary, "state": self.fsm.state.name, "error": f"Timeout: {report.summary}"})
+                    self._publish(
+                        EventType.VERIFICATION_FAILED,
+                        evidence_id=report_evidence_id,
+                        payload={"decision": "TIMEOUT", **report_payload},
+                    )
+                    self._publish(EventType.TIMEOUT, evidence_id=report_evidence_id, payload=report_payload)
+                    self._publish(
+                        EventType.TASK_FAILED,
+                        evidence_id=report_evidence_id,
+                        payload={"state": self.fsm.state.name, "error": f"Timeout: {report.summary}", **report_payload},
+                    )
                 else:  # REPAIR
-                    self._publish(EventType.VERIFICATION_FAILED, payload={"decision": "REPAIR", "summary": report.summary})
+                    self._publish(
+                        EventType.VERIFICATION_FAILED,
+                        evidence_id=report_evidence_id,
+                        payload={"decision": "REPAIR", **report_payload},
+                    )
 
                 if report.decision == Decision.PASS:
                     self.evidence.save()
                     self.fsm.complete(True)
-                    self._publish(EventType.TASK_COMPLETED, payload={"summary": last_summary, "state": self.fsm.state.name})
+                    self._publish(
+                        EventType.TASK_COMPLETED,
+                        evidence_id=report_evidence_id,
+                        payload={"summary": last_summary, "state": self.fsm.state.name, **({"evidence_ids": report_evidence_ids} if report_evidence_ids else {})},
+                    )
                     return AgentResult(
                         ok=True,
                         state=self.fsm.state.name,
