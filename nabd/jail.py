@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import hashlib
 import re
+import shlex
+import shutil
 from pathlib import Path
 from typing import Iterable
 
@@ -11,9 +13,11 @@ from typing import Iterable
 BLOCKED_PATH_PATTERNS = (
     re.compile(r"(?:^|/)\.git(?:/|$)", re.IGNORECASE),
     re.compile(r"(?:^|/)\.env(?:\.|/|$)", re.IGNORECASE),
+    re.compile(r"(?:^|/)\.nabd(?:/|$)", re.IGNORECASE),
     re.compile(r"(?:^|/)\.ssh(?:/|$)", re.IGNORECASE),
     re.compile(r"(?:^|/)\.aws(?:/|$)", re.IGNORECASE),
     re.compile(r"(?:^|/)\.config(?:/|$)", re.IGNORECASE),
+    re.compile(r"(?:/|^)__pycache__(?:/|$)", re.IGNORECASE),
     re.compile(r"(?:^|/)\.\.(?:/|$)"),
     re.compile(r"^/etc(?:/|$)"),
     re.compile(r"^/proc(?:/|$)"),
@@ -23,19 +27,44 @@ BLOCKED_PATH_PATTERNS = (
 BLOCKED_COMMAND_PATTERNS = (
     re.compile(r"\brm\s+-[a-z]*r[a-z]*f[a-z]*\s+(?:/|~|\*)", re.IGNORECASE),
     re.compile(r"\brm\s+-[a-z]*f[a-z]*r[a-z]*\s+(?:/|~|\*)", re.IGNORECASE),
-    re.compile(r"(?:curl|wget)[^\n|]*\|\s*/?(?:(?:[A-Za-z0-9_.-]+/)*(?:ba)?sh)\b", re.IGNORECASE),
+    re.compile(r"(?:curl|wget)[^\n|]*\s*\|\s*/?(?:(?:[A-Za-z0-9_.-]+/)*(?:ba)?sh)\b", re.IGNORECASE),
     re.compile(r"\beval\b", re.IGNORECASE),
     re.compile(r"\bexec\b", re.IGNORECASE),
     re.compile(r"(?:^|[;&|])\s*sudo\b", re.IGNORECASE),
     re.compile(r"\bchmod\s+(?:[0-7]*7[0-7]*|\+?r?wx)\b", re.IGNORECASE),
-    re.compile(r">\s*/(?:etc|proc|sys)(?:/|\s|$)", re.IGNORECASE),
+    re.compile(r">\s*/(?:etc|proc|sys)(?:\s|$)", re.IGNORECASE),
     re.compile(r"(?:^|[;&|])\s*dd\s+[^\n]*\bof=/dev/", re.IGNORECASE),
     re.compile(r"(?:^|[\s;&|])\.\.(?:[/\\]|$)", re.IGNORECASE),
+    # M5: close interpreter `-c`/`-e` wrappers that bypass command-shape checks
+    # by running arbitrary nested code outside the jail's pattern scanner.
+    re.compile(r"(?:^|[\s;&|])\s*env\b", re.IGNORECASE),
+    re.compile(r"\b(?:ba)?sh\b[^\n]*\s+-[a-z]*c\b", re.IGNORECASE),
+    re.compile(r"\bpython3?\b[^\n]*\s+-[a-z]*[ce]\b", re.IGNORECASE),
+    re.compile(r"\b(?:zsh|ksh|csh|tcsh)\b[^\n]*\s+-[a-z]*c\b", re.IGNORECASE),
+    re.compile(r"\b(?:perl|ruby|node|php)\b[^\n]*\s+-[a-z]*[ce]\b", re.IGNORECASE),
+    re.compile(r"\bfind\b[^\n]*\s-(?:exec|execdir|ok|okdir|delete|fprint|fprintf|fls)\b"),
 )
 
 
 class JailError(RuntimeError):
     """Raised when a workspace or command safety violation is detected."""
+
+
+# Patterns blocked only for public (model-facing) paths.
+# .nabd is included here so ReadTool/ListTool/SearchTool never expose
+# internal artifacts to the model context.
+PUBLIC_BLOCKED_PATH_PATTERNS = (
+    *BLOCKED_PATH_PATTERNS,
+)
+
+# Patterns blocked for internal (trusted-code) paths.
+# .nabd is *excluded* so WriteTool, verifier, and EvidenceStore can
+# access .nabd/backups and .nabd/evidence.json.  All other blocks
+# (root dirs, system paths, dotfiles) still apply.
+INTERNAL_BLOCKED_PATH_PATTERNS = tuple(
+    p for p in BLOCKED_PATH_PATTERNS
+    if p.pattern != r"(?:^|/)\.nabd(?:/|$)"
+)
 
 
 class WorkspaceJail:
@@ -46,11 +75,14 @@ class WorkspaceJail:
         if not self.workspace_root.is_dir():
             raise JailError(f"Workspace root does not exist: {workspace_root}")
 
-    def check_path(self, path: str | Path, allow_missing: bool = True) -> Path:
+    def _check_path_against(
+        self, path: str | Path, allow_missing: bool, patterns: tuple
+    ) -> Path:
+        """Shared implementation for check_path / check_internal_path."""
         raw_path = str(path)
         if re.search(r"(?:^|[/\\])\.\.(?:[/\\]|$)", raw_path):
             raise JailError(f"Blocked traversal path: {path}")
-        candidate = Path(path).expanduser()
+        candidate = Path(raw_path).expanduser()
         if not candidate.is_absolute():
             candidate = self.workspace_root / candidate
         candidate = candidate.resolve()
@@ -60,12 +92,24 @@ class WorkspaceJail:
             raise JailError(f"Path outside workspace: {path}") from exc
 
         path_string = str(candidate)
-        for pattern in BLOCKED_PATH_PATTERNS:
+        for pattern in patterns:
             if pattern.search(path_string):
                 raise JailError(f"Blocked path pattern: {path}")
         if not allow_missing and not candidate.exists():
             raise JailError(f"Path does not exist: {path}")
         return candidate
+
+    def check_path(self, path: str | Path, allow_missing: bool = True) -> Path:
+        """Public path check — blocks .nabd and all sensitive directories."""
+        return self._check_path_against(path, allow_missing, PUBLIC_BLOCKED_PATH_PATTERNS)
+
+    def check_internal_path(self, path: str | Path, allow_missing: bool = True) -> Path:
+        """Internal path check — allows .nabd for trusted artifact access.
+
+        Callers: WriteTool (backups), verifier (backups), EvidenceStore (save).
+        This must NOT be reachable from ToolCall arguments or model data.
+        """
+        return self._check_path_against(path, allow_missing, INTERNAL_BLOCKED_PATH_PATTERNS)
 
     def check_command(self, command: str) -> None:
         if not command.strip():
@@ -73,6 +117,76 @@ class WorkspaceJail:
         for pattern in BLOCKED_COMMAND_PATTERNS:
             if pattern.search(command):
                 raise JailError(f"Blocked command pattern: {command}")
+        self._reject_command_path_escape(command)
+
+    def _reject_command_path_escape(self, command: str) -> None:
+        """Reject shell commands that name paths escaping the workspace.
+
+        Closes WorkspaceJail escape via absolute paths outside the root or
+        `..` traversal. The executable (head) token is allowed to be an absolute
+        path only when it resolves inside the workspace or is a recognized
+        executable on PATH (e.g. /usr/bin/python3); arbitrary absolute
+        executables outside the workspace (e.g. /tmp/evil) are blocked. All
+        other (argument) tokens must stay inside the workspace root.
+        """
+        try:
+            tokens = shlex.split(command, posix=True, comments=False)
+        except ValueError:
+            raise JailError(f"Blocked command (unparsable): {command}")
+
+        launchers = {
+            "sudo", "env", "time", "nohup", "stdbuf", "nice",
+            "command", "bash", "sh", "zsh", "ksh", "csh",
+        }
+        idx = 0
+        while idx < len(tokens):
+            tok = tokens[idx]
+            if "=" in tok and not any(m in tok for m in (";", "|", "&", ">", "<", "(", "$")):
+                idx += 1
+                continue
+            if tok in launchers:
+                idx += 1
+                continue
+            break
+        head = tokens[idx] if idx < len(tokens) else None
+        if head is not None:
+            self._check_path_token(head, command, is_head=True)
+        for tok in tokens[idx + 1:]:
+            self._check_path_token(tok, command, is_head=False)
+
+    def _check_path_token(self, tok: str, command: str, is_head: bool) -> None:
+        if tok.startswith("-"):
+            return
+        if "/" not in tok and ".." not in tok:
+            return
+        if re.search(r"(?:^|/)\.\.(?:/|$)", tok):
+            raise JailError(f"Blocked path traversal in command: {command}")
+        # Block any command that names a path inside the agent's internal
+        # .nabd runtime directory.  .nabd is excluded from verification
+        # snapshots, so a malicious actor could plant code there without it
+        # being tracked; refusing to execute anything from .nabd closes that
+        # gap (the agent only ever writes to .nabd from trusted Python code
+        # via check_internal_path, never via shell commands).
+        candidate = Path(tok)
+        if not candidate.is_absolute():
+            candidate = self.workspace_root / tok
+        try:
+            rel = candidate.resolve().relative_to(self.workspace_root)
+            if ".nabd" in rel.parts:
+                raise JailError(f"Blocked command targeting internal .nabd directory: {command}")
+        except ValueError:
+            pass
+        if not tok.startswith("/"):
+            return
+        resolved = Path(tok).resolve()
+        try:
+            resolved.relative_to(self.workspace_root)
+            return
+        except ValueError:
+            pass
+        if is_head and shutil.which(tok):
+            return
+        raise JailError(f"Blocked absolute path outside workspace: {command}")
 
     def safe_write(self, path: str | Path, content: str) -> str:
         target = self.check_path(path, allow_missing=True)

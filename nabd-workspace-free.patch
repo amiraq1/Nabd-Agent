@@ -1,0 +1,208 @@
+[1mdiff --git a/README.md b/README.md[m
+[1mindex 0197e3d..bc05d89 100644[m
+[1m--- a/README.md[m
+[1m+++ b/README.md[m
+[36m@@ -101,6 +101,19 @@[m [mnabd "أصلح جميع الاختبارات الفاشلة" --max-rounds 3[m
+ [m
+ المهام غير المعروفة تُصنف `MUTATING` حتى لا يمنع التصنيف التخمينِي مهمة إصلاح صحيحة. التنفيذ التلقائي الافتراضي لا يلغي هذه السياسة؛ فهو يزيل موافقة المستخدم التفاعلية فقط، بينما تبقى سياسة النطاق وWorkspaceJail وEvidenceStore وFSM إلزامية.[m
+ [m
+[32m+[m[32m### وضع الحرية داخل workspace[m
+[32m+[m
+[32m+[m[32mإذا أردت حرية الأدوات داخل مجلد المستودع دون موافقات أو Mutation Policy، استخدم الخيار الاختياري:[m
+[32m+[m
+[32m+[m[32m```sh[m
+[32m+[m[32mnabd --workspace-free --root ~/projects/app \[m
+[32m+[m[32m  "افحص المشروع وعدّل الملفات المطلوبة وشغّل الاختبارات"[m
+[32m+[m[32m```[m
+[32m+[m
+[32m+[m[32mفي هذا الوضع تُعامل المهمة كـ `MUTATING` وتصبح الموافقات تلقائية، وتبقى فحوص المسارات والـ Shell الموجودة في WorkspaceJail فعالة. اسم الوضع يعني الحرية التشغيلية داخل الجذر وفق فحوص Nabd، وليس صلاحية عامة على جهاز Termux. تبقى RawFacts وEvidenceStore وFSM فعالة لتسجيل ما حدث ومنع إعلان نجاح غير مثبت.[m
+[32m+[m
+[32m+[m[32m> **حد أمني مهم:** WorkspaceJail فاحص أنماط وحدود، وليس عزلًا كاملًا لنظام التشغيل. أمر Shell يستطيع بعض المفسرات من داخله الوصول إلى مسارات خارجية بطرق غير ظاهرة للنص، مثل كود Python أو أدوات أخرى. إذا كان شرط «لا يخرج أبدًا إلى الجهاز» ضمانًا صارمًا، فلا تستخدم Shell الحر؛ تحتاج إلى عزل OS حقيقي مثل `proot` أو حاوية، أو تشغيل الأدوات غير المعتمدة فقط. هذا الخيار يزيل القيود الوظيفية والموافقات، ولا يحوّل Python إلى sandbox كامل.[m
+[32m+[m
+ ## سجل الأدلة[m
+ [m
+ يستخدم الوكيل `EvidenceStore v2`. الأدلة من نوع `OBSERVED` تُسجل فقط بعد تحقق فعلي: وجود الملف على القرص مع بصمة SHA-256، أو نجاح أمر تحقق بخروج يساوي صفرًا. أما المعلومات التي ينتجها النموذج فتظل توجيهًا تخطيطيًا ولا تكفي وحدها لإعلان النجاح. يعيد `is_usable_for_completion()` التحقق من الأدلة الحالية، بينما لا تمنع محاولات فاشلة سابقة إصلاحًا لاحقًا داخل نفس المهمة إذا ظهرت أدلة جديدة صالحة. يُحفظ السجل محليًا في `.nabd/evidence.json` وهو متجاهل في Git افتراضيًا.[m
+[1mdiff --git a/nabd/agent.py b/nabd/agent.py[m
+[1mindex cb787b8..0d6eaed 100644[m
+[1m--- a/nabd/agent.py[m
+[1m+++ b/nabd/agent.py[m
+[36m@@ -169,18 +169,25 @@[m [mdef _context(task: str, files: str, history: List[ToolResult], failures: List[To[m
+ [m
+ [m
+ class NabdAgent:[m
+[31m-    def __init__(self, root: Path, provider: str = "auto", auto_approve: bool = False) -> None:[m
+[32m+[m[32m    def __init__([m
+[32m+[m[32m        self,[m
+[32m+[m[32m        root: Path,[m
+[32m+[m[32m        provider: str = "auto",[m
+[32m+[m[32m        auto_approve: bool = False,[m
+[32m+[m[32m        workspace_free: bool = False,[m
+[32m+[m[32m    ) -> None:[m
+         self.client = LLMClient(provider)[m
+         self.fsm = FSM()[m
+         self.history: List[ToolResult] = [][m
+[31m-        self.auto_approve = auto_approve[m
+[32m+[m[32m        self.auto_approve = auto_approve or workspace_free[m
+[32m+[m[32m        self.workspace_free = workspace_free[m
+         self.intent = "MUTATING"[m
+         self.task_id = EvidenceStore.new_task_id()[m
+         self.evidence = EvidenceStore(root, task_id=self.task_id)[m
+         self.executor = ToolExecutor([m
+             root,[m
+             approve=self._approve,[m
+[31m-            auto_approve=auto_approve,[m
+[32m+[m[32m            auto_approve=self.auto_approve,[m
+             evidence_store=self.evidence,[m
+         )[m
+ [m
+[36m@@ -209,7 +216,7 @@[m [mclass NabdAgent:[m
+ [m
+     def run(self, task: str, max_rounds: int = 5) -> AgentResult:[m
+         try:[m
+[31m-            self.intent = classify_intent(task)[m
+[32m+[m[32m            self.intent = "MUTATING" if self.workspace_free else classify_intent(task)[m
+             self.executor.set_intent(self.intent)[m
+             inventory = self.executor.execute(ToolCall("list_files", {"path": "."}))[m
+             self.history.append(inventory)[m
+[1mdiff --git a/nabd/cli.py b/nabd/cli.py[m
+[1mindex 2dca622..2ce14cf 100644[m
+[1m--- a/nabd/cli.py[m
+[1m+++ b/nabd/cli.py[m
+[36m@@ -23,6 +23,11 @@[m [mdef build_parser() -> argparse.ArgumentParser:[m
+     )[m
+     parser.add_argument("--provider", choices=["auto", "openai", "gemini", "nvidia"], default=os.getenv("NABD_PROVIDER", "auto"))[m
+     parser.add_argument("--max-rounds", type=int, default=5, help="الحد الأقصى لدورات الإصلاح")[m
+[32m+[m[32m    parser.add_argument([m
+[32m+[m[32m        "--workspace-free",[m
+[32m+[m[32m        action="store_true",[m
+[32m+[m[32m        help="حرية الأدوات داخل workspace دون موافقات أو Mutation Policy؛ تبقى حدود WorkspaceJail فعالة",[m
+[32m+[m[32m    )[m
+     approval = parser.add_mutually_exclusive_group()[m
+     approval.add_argument([m
+         "--yes", "--auto", dest="auto_approve", action="store_true", default=True,[m
+[36m@@ -45,9 +50,20 @@[m [mdef main(argv: list[str] | None = None) -> int:[m
+         parser.error(f"مجلد المشروع غير موجود: {root}")[m
+ [m
+     print(f"Nabd يعمل داخل: {root}")[m
+[31m-    print(f"المزود: {args.provider} | التنفيذ التلقائي: {'نعم' if args.auto_approve else 'لا'}")[m
+[32m+[m[32m    effective_auto_approve = args.auto_approve or args.workspace_free[m
+[32m+[m[32m    print([m
+[32m+[m[32m        f"المزود: {args.provider} | التنفيذ التلقائي: "[m
+[32m+[m[32m        f"{'نعم' if effective_auto_approve else 'لا'}"[m
+[32m+[m[32m    )[m
+[32m+[m[32m    if args.workspace_free:[m
+[32m+[m[32m        print("وضع الأدوات: workspace-free (داخل الجذر فقط)")[m
+     try:[m
+[31m-        agent = NabdAgent(root, provider=args.provider, auto_approve=args.auto_approve)[m
+[32m+[m[32m        agent = NabdAgent([m
+[32m+[m[32m            root,[m
+[32m+[m[32m            provider=args.provider,[m
+[32m+[m[32m            auto_approve=effective_auto_approve,[m
+[32m+[m[32m            workspace_free=args.workspace_free,[m
+[32m+[m[32m        )[m
+     except LLMError as exc:[m
+         print(f"خطأ في إعداد المزود: {exc}", file=sys.stderr)[m
+         return 2[m
+[1mdiff --git a/nabd/write_tool.py b/nabd/write_tool.py[m
+[1mindex fe5c270..a3d0aa2 100644[m
+[1m--- a/nabd/write_tool.py[m
+[1m+++ b/nabd/write_tool.py[m
+[36m@@ -18,6 +18,10 @@[m [mfrom .jail import WorkspaceJail[m
+ from .raw_facts import RawFacts[m
+ [m
+ [m
+[32m+[m[32mclass WriteToolError(ValueError):[m
+[32m+[m[32m    """Structured write failure surfaced through ToolExecutor."""[m
+[32m+[m
+[32m+[m
+ def _sha256(p: pathlib.Path) -> Optional[str]:[m
+     """Compute SHA-256 of a file, or None if missing."""[m
+     if not p.exists() or not p.is_file():[m
+[36m@@ -71,7 +75,7 @@[m [mclass WriteTool:[m
+         try:[m
+             resolved = self.jail.check_path(path, allow_missing=True)[m
+         except Exception as e:[m
+[31m-            raise RuntimeError(f"blocked: {e}")[m
+[32m+[m[32m            raise WriteToolError(f"blocked: {e}") from e[m
+ [m
+         rel = resolved.relative_to(self.root)[m
+ [m
+[36m@@ -127,7 +131,7 @@[m [mclass WriteTool:[m
+             except Exception as e:[m
+                 if tmp.exists():[m
+                     tmp.unlink(missing_ok=True)[m
+[31m-                raise RuntimeError(f"write failed: {e}")[m
+[32m+[m[32m                raise WriteToolError(f"write failed: {e}") from e[m
+             finally:[m
+                 if tmp.exists():[m
+                     tmp.unlink(missing_ok=True)[m
+[36m@@ -135,7 +139,7 @@[m [mclass WriteTool:[m
+             # 5. AFTER snapshot from the filesystem.[m
+             after_sha = _sha256(resolved)[m
+             if after_sha is None:[m
+[31m-                raise RuntimeError("after sha failed")[m
+[32m+[m[32m                raise WriteToolError("after sha failed")[m
+             after_stat = resolved.stat()[m
+             after_size = after_stat.st_size[m
+             after_mtime = after_stat.st_mtime[m
+[1mdiff --git a/tests/test_cli.py b/tests/test_cli.py[m
+[1mindex 8517526..a9e5b4c 100644[m
+[1m--- a/tests/test_cli.py[m
+[1m+++ b/tests/test_cli.py[m
+[36m@@ -20,6 +20,12 @@[m [mclass CLITests(unittest.TestCase):[m
+         args = build_parser().parse_args(["مهمة تجريبية", "--workspace", "/tmp/project"])[m
+         self.assertEqual(args.root, "/tmp/project")[m
+ [m
+[32m+[m[32m    def test_workspace_free_mode_is_opt_in(self):[m
+[32m+[m[32m        normal = build_parser().parse_args(["مهمة تجريبية"])[m
+[32m+[m[32m        free = build_parser().parse_args(["مهمة تجريبية", "--workspace-free"])[m
+[32m+[m[32m        self.assertFalse(normal.workspace_free)[m
+[32m+[m[32m        self.assertTrue(free.workspace_free)[m
+[32m+[m
+ [m
+ if __name__ == "__main__":[m
+     unittest.main()[m
+[1mdiff --git a/tests/test_mutation_policy.py b/tests/test_mutation_policy.py[m
+[1mindex 9de1236..d7e9071 100644[m
+[1m--- a/tests/test_mutation_policy.py[m
+[1m+++ b/tests/test_mutation_policy.py[m
+[36m@@ -110,6 +110,39 @@[m [mclass MutationPolicyTests(unittest.TestCase):[m
+             self.assertTrue(result.ok)[m
+             self.assertEqual((root / "created.txt").read_text(encoding="utf-8"), "ok")[m
+ [m
+[32m+[m[32m    def test_workspace_free_never_writes_outside_workspace(self):[m
+[32m+[m[32m        with tempfile.TemporaryDirectory() as directory:[m
+[32m+[m[32m            root = Path(directory)[m
+[32m+[m[32m            agent = NabdAgent(root, auto_approve=False, workspace_free=True)[m
+[32m+[m[32m            outside = root.parent / "nabd-workspace-outside.txt"[m
+[32m+[m[32m            try:[m
+[32m+[m[32m                result = agent.executor.execute([m
+[32m+[m[32m                    ToolCall([m
+[32m+[m[32m                        "write_file",[m
+[32m+[m[32m                        {"path": "../nabd-workspace-outside.txt", "content": "blocked"},[m
+[32m+[m[32m                    )[m
+[32m+[m[32m                )[m
+[32m+[m[32m                self.assertFalse(result.ok)[m
+[32m+[m[32m                self.assertIn("blocked:", result.output)[m
+[32m+[m[32m                self.assertFalse(outside.exists())[m
+[32m+[m[32m            finally:[m
+[32m+[m[32m                outside.unlink(missing_ok=True)[m
+[32m+[m
+[32m+[m[32m    def test_workspace_free_agent_allows_write_without_confirmation(self):[m
+[32m+[m[32m        with tempfile.TemporaryDirectory() as directory:[m
+[32m+[m[32m            root = Path(directory)[m
+[32m+[m[32m            agent = NabdAgent(root, auto_approve=False, workspace_free=True)[m
+[32m+[m[32m            agent.client = ReadOnlyWriteClient()[m
+[32m+[m
+[32m+[m[32m            result = agent.run("افحص المستودع واعطني ملخص", max_rounds=1)[m
+[32m+[m
+[32m+[m[32m            self.assertTrue(result.ok)[m
+[32m+[m[32m            self.assertEqual(result.state, "COMPLETED")[m
+[32m+[m[32m            self.assertEqual([m
+[32m+[m[32m                (root / "README.md").read_text(encoding="utf-8"),[m
+[32m+[m[32m                "must not be written",[m
+[32m+[m[32m            )[m
+[32m+[m
+     def test_mutating_task_can_write_when_auto_approved(self):[m
+         with tempfile.TemporaryDirectory() as directory:[m
+             root = Path(directory)[m

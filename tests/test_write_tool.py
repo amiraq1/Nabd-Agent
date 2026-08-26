@@ -27,7 +27,7 @@ class WriteToolTests(unittest.TestCase):
             target.write_text("old", encoding="utf-8")
             facts = WriteTool(root).run("hello.txt", "new")
             self.assertIsNotNone(facts.backup)
-            backups = list((root / ".nabd" / "backups").glob("hello.txt.backup.*"))
+            backups = list((root / ".nabd" / "backups").glob("hello.txt.*.bak"))
             self.assertEqual(len(backups), 1)
             self.assertEqual(backups[0].read_text(encoding="utf-8"), "old")
 
