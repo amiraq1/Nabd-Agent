@@ -11,6 +11,7 @@ from .evidence import EvidenceStore
 from .fsm import FSM, FSMError, State
 from .llm import LLMClient, LLMError
 from .models import AgentResult, Plan, ToolCall, ToolResult
+from .snapshot import SnapshotError, SnapshotStore
 from .tools import ToolExecutor, format_call
 
 SYSTEM_PROMPT = """You are Nabd, a senior software engineer operating inside a user's local project.
@@ -177,6 +178,9 @@ class NabdAgent:
         self.intent = "MUTATING"
         self.task_id = EvidenceStore.new_task_id()
         self.evidence = EvidenceStore(root, task_id=self.task_id)
+        self.snapshot = SnapshotStore(root)
+        self._snapshot_invalid = False
+        self._snapshot_error = ""
         self.executor = ToolExecutor(
             root,
             approve=self._approve,
@@ -186,8 +190,21 @@ class NabdAgent:
 
     def _approve(self, call: ToolCall) -> bool:
         print(f"\nطلب الوكيل تنفيذ: {format_call(call)}")
-        answer = input("السماح؟ [y/N]: ").strip().lower()
-        return answer in {"y", "yes", "نعم", "ن"}
+        try:
+            answer = input("السماح؟ [y/N]: ").strip().casefold()
+        except (EOFError, KeyboardInterrupt):
+            return False
+        # Explicit allowlist: every other value, including n/no/لا/blank,
+        # denies the operation. There is no implicit approval path here.
+        return answer in {"y", "yes", "نعم"}
+
+    def _take_snapshot_before(self) -> None:
+        """Create or validate the pre-run manifest; never continue on failure."""
+        try:
+            self.snapshot.load_or_create(self.task_id)
+        except (SnapshotError, OSError, ValueError) as exc:
+            self._snapshot_invalid = True
+            self._snapshot_error = str(exc) or "snapshot integrity check failed"
 
     def _run_calls(self, calls: List[ToolCall]) -> List[ToolResult]:
         results: List[ToolResult] = []
@@ -209,6 +226,22 @@ class NabdAgent:
 
     def run(self, task: str, max_rounds: int = 5) -> AgentResult:
         try:
+            self._take_snapshot_before()
+            if self._snapshot_invalid:
+                self.evidence.add_inferred(
+                    "pre-run snapshot integrity",
+                    details={"status": "REJECTED", "reason": self._snapshot_error},
+                )
+                self.evidence.save()
+                self.fsm.transition(State.REJECTED)
+                return AgentResult(
+                    ok=False,
+                    state=self.fsm.state.name,
+                    summary="",
+                    evidence=[item.to_dict() for item in self.evidence.get_all()],
+                    error="رفض التشغيل: تعذر إنشاء أو التحقق من Snapshot قبل البدء",
+                )
+
             self.intent = classify_intent(task)
             self.executor.set_intent(self.intent)
             inventory = self.executor.execute(ToolCall("list_files", {"path": "."}))
