@@ -23,7 +23,9 @@ class ShellToolTests(unittest.TestCase):
 
     def test_returns_nonzero_command_status(self):
         with tempfile.TemporaryDirectory() as directory:
-            facts = ShellTool(Path(directory)).run("python3 -c 'raise SystemExit(3)'")
+            script = Path(directory) / "exit3.py"
+            script.write_text("import sys\nsys.exit(3)\n")
+            facts = ShellTool(Path(directory)).run(f"python3 {script}")
             self.assertEqual(facts.exit_code, 3)
             self.assertFalse(facts.successful)
 

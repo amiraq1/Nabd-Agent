@@ -309,6 +309,7 @@ class LifecycleRollbackTests(unittest.TestCase):
             self.assertEqual(result.state, "ROLLED_BACK")
 
     def test_failure_signature_streak_detected(self):
+        """Repeated identical failures must break the repair loop (no 3rd attempt)."""
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             _setup_sandbox(root)
@@ -318,7 +319,13 @@ class LifecycleRollbackTests(unittest.TestCase):
 
             result = agent.run("fix calculator", max_rounds=5)
 
-            self.assertIsNotNone(agent._last_failure_signature)
+            # Must terminate (not loop forever) and end rolled back.
+            self.assertFalse(result.ok)
+            self.assertEqual(result.state, "ROLLED_BACK")
+            # The same broken fix is returned every call; after two identical
+            # failures the gate breaks the loop, so a 3rd repair is never tried.
+            self.assertLessEqual(agent.client.call_count, 2)
+            self.assertGreaterEqual(len(agent._failure_signatures), 1)
 
     def test_rollback_error_message(self):
         with tempfile.TemporaryDirectory() as tmpdir:

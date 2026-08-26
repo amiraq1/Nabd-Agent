@@ -18,7 +18,18 @@ class LLMError(RuntimeError):
     """Raised when an LLM request cannot be completed or parsed."""
 
 
-def _request_json(url: str, payload: Dict[str, Any], headers: Dict[str, str]) -> Dict[str, Any]:
+def _redact_secret(value: str, secret: Optional[str]) -> str:
+    if secret:
+        return value.replace(secret, "[REDACTED]")
+    return value
+
+
+def _request_json(
+    url: str,
+    payload: Dict[str, Any],
+    headers: Dict[str, str],
+    secret: Optional[str] = None,
+) -> Dict[str, Any]:
     body = json.dumps(payload).encode("utf-8")
     request = urllib.request.Request(url, data=body, headers=headers, method="POST")
     try:
@@ -26,13 +37,17 @@ def _request_json(url: str, payload: Dict[str, Any], headers: Dict[str, str]) ->
             raw = response.read().decode("utf-8")
     except urllib.error.HTTPError as exc:
         detail = exc.read().decode("utf-8", errors="replace")
+        detail = _redact_secret(detail, secret)
         raise LLMError(f"Provider HTTP {exc.code}: {detail[:800]}") from exc
     except urllib.error.URLError as exc:
-        raise LLMError(f"Network error: {exc.reason}") from exc
+        reason = _redact_secret(str(exc.reason), secret)
+        raise LLMError(f"Network error: {reason}") from exc
     try:
         return json.loads(raw)
     except json.JSONDecodeError as exc:
-        raise LLMError(f"Provider returned invalid JSON: {raw[:500]}") from exc
+        raise LLMError(
+            f"Provider returned invalid JSON: {_redact_secret(raw[:500], secret)}"
+        ) from exc
 
 
 def extract_json(text: str) -> Dict[str, Any]:
@@ -112,11 +127,14 @@ class LLMClient:
             os.getenv("NABD_OPENAI_BASE_URL", "https://api.openai.com/v1/chat/completions"),
             payload,
             {"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+            secret=key,
         )
         try:
             return data["choices"][0]["message"]["content"]
         except (KeyError, IndexError, TypeError) as exc:
-            raise LLMError(f"Unexpected OpenAI response: {str(data)[:800]}") from exc
+            raise LLMError(
+                f"Unexpected OpenAI response: {_redact_secret(str(data)[:800], key)}"
+            ) from exc
 
     def _nvidia(self, system: str, user: str) -> str:
         key = os.getenv("NVIDIA_API_KEY")
@@ -135,11 +153,14 @@ class LLMClient:
             os.getenv("NABD_NVIDIA_BASE_URL", "https://integrate.api.nvidia.com/v1/chat/completions"),
             payload,
             {"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+            secret=key,
         )
         try:
             return data["choices"][0]["message"]["content"]
         except (KeyError, IndexError, TypeError) as exc:
-            raise LLMError(f"Unexpected NVIDIA response: {str(data)[:800]}") from exc
+            raise LLMError(
+                f"Unexpected NVIDIA response: {_redact_secret(str(data)[:800], key)}"
+            ) from exc
 
     def _gemini(self, system: str, user: str) -> str:
         key = os.getenv("GEMINI_API_KEY")
@@ -147,7 +168,7 @@ class LLMClient:
             raise LLMError("GEMINI_API_KEY is not set")
         url = (
             "https://generativelanguage.googleapis.com/v1beta/models/"
-            f"{self.model}:generateContent?key={key}"
+            f"{self.model}:generateContent"
         )
         payload = {
             "system_instruction": {"parts": [{"text": system}]},
@@ -157,8 +178,15 @@ class LLMClient:
                 "responseMimeType": "application/json",
             },
         }
-        data = _request_json(url, payload, {"Content-Type": "application/json"})
+        data = _request_json(
+            url,
+            payload,
+            {"Content-Type": "application/json", "x-goog-api-key": key},
+            secret=key,
+        )
         try:
             return data["candidates"][0]["content"]["parts"][0]["text"]
         except (KeyError, IndexError, TypeError) as exc:
-            raise LLMError(f"Unexpected Gemini response: {str(data)[:800]}") from exc
+            raise LLMError(
+                f"Unexpected Gemini response: {_redact_secret(str(data)[:800], key)}"
+            ) from exc

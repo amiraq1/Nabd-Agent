@@ -70,6 +70,8 @@ class VerificationGate:
         snapshots_after: Optional[Dict[str, str]] = None,
         changed_files: Optional[List[str]] = None,
         repair_count: int = 0,
+        failure_signatures: Optional[List[FailureSignature]] = None,
+        current_attempt_seq: Optional[int] = None,
     ) -> None:
         self.root = Path(root).expanduser().resolve()
         self.evidence = evidence
@@ -79,6 +81,19 @@ class VerificationGate:
         self.snapshots_after: Dict[str, str] = snapshots_after or {}
         self.changed_files: List[str] = changed_files or []
         self.repair_count = repair_count
+        # History of failure signatures from *prior* repair attempts. When the
+        # current attempt's signature matches a prior one, the gate breaks the
+        # repair loop (repeated identical failure -> ROLLBACK).
+        self.failure_signatures: List[FailureSignature] = list(failure_signatures or [])
+        # When set, evidence records are scoped to this attempt sequence so a
+        # prior attempt's PASS cannot satisfy a criterion for the current one.
+        self.current_attempt_seq: Optional[int] = current_attempt_seq
+
+    def _evidence_for_current_attempt(self):
+        records = self.evidence.get_all()
+        if self.current_attempt_seq is None:
+            return records
+        return [e for e in records if getattr(e, "attempt_seq", 0) == self.current_attempt_seq]
 
     # ── Public API ────────────────────────────────────────────────────
 
@@ -121,6 +136,7 @@ class VerificationGate:
             failed_required=failed_required,
             missing_evidence=missing_evidence,
             budget_spent=budget_spent,
+            results=results,
         )
 
         # 4. Build summary
@@ -160,13 +176,15 @@ class VerificationGate:
 
         Looks for evidence records (observed or inferred) whose claim
         contains the command string, then compares the recorded exit_code.
+        Evidence is scoped to the current attempt when one is configured, so a
+        previous attempt's PASS/FAIL cannot contaminate this evaluation.
         """
         expected = criterion.expected if criterion.expected is not None else 0
-        evidence_records = self.evidence.get_all()
+        evidence_records = self._evidence_for_current_attempt()
 
-        # Iterate in reverse to use the most recent matching evidence.
-        # Earlier (failed) evidence from a previous repair round should
-        # not override a later (successful) result.
+        # Iterate in reverse to use the most recent matching evidence within
+        # the current attempt. Earlier evidence from a previous repair round is
+        # not in scope and cannot override the current result.
         for ev in reversed(evidence_records):
             cmd = ev.details.get("command", "") or ev.details.get("operation", "")
             if criterion.command and criterion.command in str(cmd):
@@ -304,9 +322,10 @@ class VerificationGate:
         """Check that a previously failing test now passes.
 
         Looks for evidence of a verification command that previously
-        failed (exit_code != 0) and now succeeds.
+        failed (exit_code != 0) and now succeeds. Scoped to the current
+        attempt when one is configured.
         """
-        evidence_records = self.evidence.get_all()
+        evidence_records = self._evidence_for_current_attempt()
 
         # Find any evidence of verification commands
         verification_evidence = [
@@ -349,6 +368,7 @@ class VerificationGate:
         failed_required: List[str],
         missing_evidence: List[str],
         budget_spent: int,
+        results: List[Result],
     ) -> Decision:
         """Derive the overall decision from criterion results.
 
@@ -371,6 +391,12 @@ class VerificationGate:
         # All required criteria passed
         if not failed_required:
             return Decision.PASS
+
+        # Repeated identical failure -> break the repair loop immediately.
+        current_sig = FailureSignature.from_results(results, self.changed_files)
+        for prior in self.failure_signatures:
+            if prior.signature == current_sig.signature and prior.file_set == current_sig.file_set:
+                return Decision.ROLLBACK
 
         # Failed required criteria exist -- check repair budget
         max_budget = self._compute_max_budget(criteria)
@@ -449,7 +475,7 @@ def take_snapshot(root: Path, jail: Optional[WorkspaceJail] = None) -> Dict[str,
         if not path.is_file():
             continue
         # Skip internal artifacts
-        if ".nabd" in path.parts or ".git" in path.parts:
+        if ".nabd" in path.parts or ".git" in path.parts or "__pycache__" in path.parts:
             continue
         try:
             jail.check_path(path, allow_missing=False)

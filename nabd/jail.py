@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import hashlib
 import re
+import shlex
+import shutil
 from pathlib import Path
 from typing import Iterable
 
@@ -33,6 +35,14 @@ BLOCKED_COMMAND_PATTERNS = (
     re.compile(r">\s*/(?:etc|proc|sys)(?:\s|$)", re.IGNORECASE),
     re.compile(r"(?:^|[;&|])\s*dd\s+[^\n]*\bof=/dev/", re.IGNORECASE),
     re.compile(r"(?:^|[\s;&|])\.\.(?:[/\\]|$)", re.IGNORECASE),
+    # M5: close interpreter `-c`/`-e` wrappers that bypass command-shape checks
+    # by running arbitrary nested code outside the jail's pattern scanner.
+    re.compile(r"(?:^|[\s;&|])\s*env\b", re.IGNORECASE),
+    re.compile(r"\b(?:ba)?sh\b[^\n]*\s+-[a-z]*c\b", re.IGNORECASE),
+    re.compile(r"\bpython3?\b[^\n]*\s+-[a-z]*[ce]\b", re.IGNORECASE),
+    re.compile(r"\b(?:zsh|ksh|csh|tcsh)\b[^\n]*\s+-[a-z]*c\b", re.IGNORECASE),
+    re.compile(r"\b(?:perl|ruby|node|php)\b[^\n]*\s+-[a-z]*[ce]\b", re.IGNORECASE),
+    re.compile(r"\bfind\b[^\n]*\s-(?:exec|execdir|ok|okdir|delete|fprint|fprintf|fls)\b"),
 )
 
 
@@ -107,6 +117,76 @@ class WorkspaceJail:
         for pattern in BLOCKED_COMMAND_PATTERNS:
             if pattern.search(command):
                 raise JailError(f"Blocked command pattern: {command}")
+        self._reject_command_path_escape(command)
+
+    def _reject_command_path_escape(self, command: str) -> None:
+        """Reject shell commands that name paths escaping the workspace.
+
+        Closes WorkspaceJail escape via absolute paths outside the root or
+        `..` traversal. The executable (head) token is allowed to be an absolute
+        path only when it resolves inside the workspace or is a recognized
+        executable on PATH (e.g. /usr/bin/python3); arbitrary absolute
+        executables outside the workspace (e.g. /tmp/evil) are blocked. All
+        other (argument) tokens must stay inside the workspace root.
+        """
+        try:
+            tokens = shlex.split(command, posix=True, comments=False)
+        except ValueError:
+            raise JailError(f"Blocked command (unparsable): {command}")
+
+        launchers = {
+            "sudo", "env", "time", "nohup", "stdbuf", "nice",
+            "command", "bash", "sh", "zsh", "ksh", "csh",
+        }
+        idx = 0
+        while idx < len(tokens):
+            tok = tokens[idx]
+            if "=" in tok and not any(m in tok for m in (";", "|", "&", ">", "<", "(", "$")):
+                idx += 1
+                continue
+            if tok in launchers:
+                idx += 1
+                continue
+            break
+        head = tokens[idx] if idx < len(tokens) else None
+        if head is not None:
+            self._check_path_token(head, command, is_head=True)
+        for tok in tokens[idx + 1:]:
+            self._check_path_token(tok, command, is_head=False)
+
+    def _check_path_token(self, tok: str, command: str, is_head: bool) -> None:
+        if tok.startswith("-"):
+            return
+        if "/" not in tok and ".." not in tok:
+            return
+        if re.search(r"(?:^|/)\.\.(?:/|$)", tok):
+            raise JailError(f"Blocked path traversal in command: {command}")
+        # Block any command that names a path inside the agent's internal
+        # .nabd runtime directory.  .nabd is excluded from verification
+        # snapshots, so a malicious actor could plant code there without it
+        # being tracked; refusing to execute anything from .nabd closes that
+        # gap (the agent only ever writes to .nabd from trusted Python code
+        # via check_internal_path, never via shell commands).
+        candidate = Path(tok)
+        if not candidate.is_absolute():
+            candidate = self.workspace_root / tok
+        try:
+            rel = candidate.resolve().relative_to(self.workspace_root)
+            if ".nabd" in rel.parts:
+                raise JailError(f"Blocked command targeting internal .nabd directory: {command}")
+        except ValueError:
+            pass
+        if not tok.startswith("/"):
+            return
+        resolved = Path(tok).resolve()
+        try:
+            resolved.relative_to(self.workspace_root)
+            return
+        except ValueError:
+            pass
+        if is_head and shutil.which(tok):
+            return
+        raise JailError(f"Blocked absolute path outside workspace: {command}")
 
     def safe_write(self, path: str | Path, content: str) -> str:
         target = self.check_path(path, allow_missing=True)

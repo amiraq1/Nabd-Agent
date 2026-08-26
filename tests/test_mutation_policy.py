@@ -22,7 +22,7 @@ class ReadOnlyWriteClient:
                     "arguments": {"path": "README.md", "content": "must not be written"},
                 }
             ],
-            "verification": ["python3 -c 'print(\"unrelated success\")'"],
+            "verification": ["pwd"],
         }
 
 
@@ -101,11 +101,10 @@ class MutationPolicyTests(unittest.TestCase):
             root = Path(directory)
             executor = ToolExecutor(root, auto_approve=True)
             executor.set_intent("MUTATING")
+            writer = root / "writer.py"
+            writer.write_text('open("created.txt", "w").write("ok")\n')
             result = executor.execute(
-                ToolCall(
-                    "run_command",
-                    {"command": "python3 -c 'open(\"created.txt\", \"w\").write(\"ok\")'"},
-                )
+                ToolCall("run_command", {"command": f'python3 "{writer}"'})
             )
             self.assertTrue(result.ok)
             self.assertEqual((root / "created.txt").read_text(encoding="utf-8"), "ok")

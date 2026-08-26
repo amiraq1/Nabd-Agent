@@ -13,6 +13,7 @@ from typing import Any, Dict, List, Optional
 
 from .jail import WorkspaceJail
 from .raw_facts import RawFacts
+from .redact import redact_obj
 
 
 class EvidenceType(Enum):
@@ -33,6 +34,7 @@ class Evidence:
     fresh: bool = True
     valid: bool = True
     details: Dict[str, Any] = field(default_factory=dict)
+    attempt_seq: int = 0
 
     @property
     def timestamp(self) -> str:
@@ -83,6 +85,7 @@ class EvidenceStore:
         task_id: Optional[str] = None,
         relevant: bool = True,
         max_age_seconds: Optional[float] = 300.0,
+        attempt_seq: int = 0,
     ) -> Evidence:
         """Re-read raw facts and mint OBSERVED only when every predicate passes."""
         requested_task = task_id or self.task_id
@@ -133,6 +136,7 @@ class EvidenceStore:
             fresh=fresh,
             valid=valid,
             details=details,
+            attempt_seq=attempt_seq,
         )
         self._evidence.append(evidence)
         return evidence
@@ -143,6 +147,7 @@ class EvidenceStore:
         path: str,
         details: Optional[Dict[str, Any]] = None,
         task_id: Optional[str] = None,
+        attempt_seq: int = 0,
     ) -> Evidence:
         """Compatibility wrapper: construct raw facts, then verify them."""
         target = self._safe_file(path)
@@ -156,7 +161,7 @@ class EvidenceStore:
             mtime=stat.st_mtime,
             details=details or {},
         )
-        return self.verify(raw, claim=claim, task_id=task_id)
+        return self.verify(raw, claim=claim, task_id=task_id, attempt_seq=attempt_seq)
 
     def add_observed_check(
         self,
@@ -165,6 +170,7 @@ class EvidenceStore:
         exit_code: int,
         output: str = "",
         task_id: Optional[str] = None,
+        attempt_seq: int = 0,
     ) -> Evidence:
         if exit_code != 0:
             raise ValueError("Only successful checks may be marked OBSERVED")
@@ -174,9 +180,9 @@ class EvidenceStore:
             stdout=output[-4000:],
             details={"kind": "verification_command", "command": command},
         )
-        return self.verify(raw, claim=claim, task_id=task_id)
+        return self.verify(raw, claim=claim, task_id=task_id, attempt_seq=attempt_seq)
 
-    def add_inferred(self, claim: str, details: Optional[Dict[str, Any]] = None, task_id: Optional[str] = None) -> Evidence:
+    def add_inferred(self, claim: str, details: Optional[Dict[str, Any]] = None, task_id: Optional[str] = None, attempt_seq: int = 0) -> Evidence:
         evidence = Evidence(
             claim=claim,
             evidence_type=EvidenceType.INFERRED,
@@ -185,6 +191,7 @@ class EvidenceStore:
             fresh=False,
             valid=False,
             details=details or {},
+            attempt_seq=attempt_seq,
         )
         self._evidence.append(evidence)
         return evidence
@@ -242,5 +249,7 @@ class EvidenceStore:
             "task_id": self.task_id,
             "evidence": [item.to_dict() for item in self._evidence],
         }
-        target.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        # Never persist secrets: redact every string value before writing.
+        redacted = redact_obj(payload)
+        target.write_text(json.dumps(redacted, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         return target

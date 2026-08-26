@@ -24,6 +24,8 @@ class RawFacts:
     stdout: str = ""
     stderr: str = ""
     signal: Optional[int] = None
+    attempt_id: str = ""
+    sequence_number: int = 0
     status: str = "OK"
     error: Optional[str] = None
     details: Dict[str, Any] = field(default_factory=dict)

@@ -225,5 +225,22 @@ class FailureSignature:
         sig = "|".join(sorted(parts))
         return FailureSignature(
             signature=sig,
-            file_set=sorted(changed_files or []),
+            file_set=sorted(set(changed_files or [])),
+        )
+
+    @staticmethod
+    def from_results(results: List["Result"], changed_files: Optional[List[str]] = None) -> "FailureSignature":
+        """Derive a signature directly from a list of criterion Results.
+
+        Equivalent to ``from_report`` but avoids constructing a full Report;
+        used by the gate's decision logic.
+        """
+        parts: List[str] = []
+        for result in results:
+            if result.status == "FAIL":
+                parts.append(f"{result.criterion_id}:{result.observed}")
+        sig = "|".join(sorted(parts))
+        return FailureSignature(
+            signature=sig,
+            file_set=sorted(set(changed_files or [])),
         )

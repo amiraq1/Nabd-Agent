@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import shlex
+import shutil
 from typing import Callable, Optional
 
 from .models import ToolCall, ToolResult
@@ -15,6 +16,7 @@ from .read_tool import ReadTool
 from .search_tool import SearchTool
 from .shell_tool import ShellTool
 from .write_tool import WriteTool
+from .mutation import MutationController
 
 
 class ToolError(RuntimeError):
@@ -74,6 +76,77 @@ def is_read_only_shell_command(command: str) -> bool:
     return True
 
 
+# Shell builtins/keywords that may legitimately lead a command line passed to
+# /bin/sh -c. These are structural markers: a natural-language planning sentence
+# (human/LLM prose) does not begin with one of them, regardless of language.
+_SHELL_BUILTINS = frozenset(
+    {
+        "cd", "echo", "export", "set", "unset", "source", ".", "read",
+        "printf", "test", "[", "]", "if", "then", "else", "elif", "fi",
+        "for", "while", "do", "done", "case", "esac", "function", "return",
+        "exit", "break", "continue", "local", "let", "eval", "exec", "mapfile",
+        "declare", "typeset", "alias", "unalias", "shift", "wait", "trap",
+        "select", "until", "bg", "fg", "disown", "jobs",
+    }
+)
+
+# Launcher prefixes that precede the real command (e.g. `sudo rm`, `env PY=1 cmd`).
+_SHELL_LAUNCHERS = frozenset(
+    {"sudo", "env", "time", "nohup", "stdbuf", "nice", "command", "bash", "sh", "zsh", "ksh", "csh"}
+)
+
+
+def is_plausible_shell_command(command: str) -> bool:
+    """Return True only when *command* is shaped like a real shell command.
+
+    The agent must never promote free natural-language text (a planning
+    sentence or thought) into an executable shell command. A genuine command
+    line begins with an executable resolvable on PATH, a shell builtin/keyword,
+    or a known safe interpreter; prose does not. The check is structural and
+    language-agnostic -- it never inspects the human language of the text, so
+    Arabic, English, or any other prose is rejected for the same reason.
+    """
+    if not isinstance(command, str) or not command.strip():
+        return False
+    try:
+        tokens = shlex.split(command.strip(), comments=False, posix=True)
+    except ValueError:
+        return False
+    if not tokens:
+        return False
+
+    idx = 0
+    # Skip launcher prefixes (sudo, env, sh -c, ...).
+    while idx < len(tokens) and tokens[idx] in _SHELL_LAUNCHERS:
+        idx += 1
+    # Skip leading `NAME=VALUE` environment assignments.
+    while idx < len(tokens) and "=" in tokens[idx] and not any(
+        meta in tokens[idx] for meta in (";", "|", "&", ">", "<", "(", "$")
+    ):
+        idx += 1
+    if idx >= len(tokens):
+        return False
+
+    head = tokens[idx]
+    # Normalize a leading command group / subshell marker: (cd x && y) / { cd x; }.
+    # shlex keeps the marker attached to the next word, so strip it off the head.
+    if head and head[0] in "({":
+        head = head[1:]
+
+    if head in _SHELL_BUILTINS:
+        return True
+    if head in _READ_ONLY_SHELL_COMMANDS:
+        return True
+    # A flag to an interpreter/launcher (e.g. `bash -c`, `sh -c`) is itself a
+    # deliberate command invocation; the wrapped program lives in the argument.
+    if head.startswith("-"):
+        return True
+    candidate = Path(head).name
+    if shutil.which(candidate) or shutil.which(head):
+        return True
+    return False
+
+
 class ToolExecutor:
     def __init__(
         self,
@@ -82,6 +155,7 @@ class ToolExecutor:
         auto_approve: bool = False,
         command_timeout: int = 120,
         evidence_store: Optional[EvidenceStore] = None,
+        controlled_mutation: bool = False,
     ) -> None:
         self.root = root.resolve()
         self.root.mkdir(parents=True, exist_ok=True)
@@ -95,6 +169,10 @@ class ToolExecutor:
         self.lister = ListTool(self.root)
         self.searcher = SearchTool(self.root)
         self.shell = ShellTool(self.root, timeout=command_timeout)
+        # M1 Controlled Mutation: when enabled, mutating operations must pass
+        # the kernel-marker contract (verify_before / verify_after). Disabled
+        # by default so existing behaviour and tests are unaffected.
+        self.controlled = MutationController(self.root) if controlled_mutation else None
 
     def set_intent(self, intent: str) -> None:
         if intent not in {"READ_ONLY", "MUTATING"}:
@@ -106,6 +184,10 @@ class ToolExecutor:
             allowed = {"list_files", "read_file", "write_file", "search", "run_command"}
             if call.name not in allowed:
                 raise ToolError(f"Unknown tool: {call.name}")
+            if call.name == "run_command":
+                command = str(call.arguments.get("command", ""))
+                if not is_plausible_shell_command(command):
+                    return self._not_a_command(call, command)
             if self.intent == "READ_ONLY" and (
                 call.name == "write_file"
                 or (
@@ -116,6 +198,20 @@ class ToolExecutor:
                 return self._mutation_denied(call)
             if call.name in {"write_file", "search", "run_command"} and not self._approved(call):
                 return ToolResult(call.name, False, "Action rejected by user", 126)
+            # M1 Controlled Mutation: route mutating operations through the
+            # kernel-marker contract. Read-only commands and read-only tasks
+            # are never gated here (they do not mutate).
+            if self.controlled is not None:
+                if call.name == "write_file":
+                    raw = self.controlled.controlled_write(
+                        self.writer,
+                        str(call.arguments["path"]),
+                        str(call.arguments["content"]),
+                    )
+                    return self._result(call.name, raw)
+                if call.name == "run_command" and not is_read_only_shell_command(command):
+                    raw = self.controlled.controlled_command(self.shell, command)
+                    return self._result(call.name, raw)
             raw = self._dispatch(call)
             return self._result(call.name, raw)
         except (ToolError, JailError, OSError, ValueError) as exc:
@@ -144,10 +240,36 @@ class ToolExecutor:
             )
         return self.shell.run(str(args.get("command", "")))
 
+    def _not_a_command(self, call: ToolCall, command: str) -> ToolResult:
+        """Reject a run_command whose payload is not a real shell command.
+
+        This is the structural firewall that stops natural-language planning
+        text from ever reaching /bin/sh: only command-shaped input proceeds.
+        """
+        message = (
+            "NOT_A_COMMAND: input was not a shell command; "
+            "refusing to execute natural-language text"
+        )
+        raw = RawFacts(
+            operation="shell",
+            path=None,
+            status="NOT_A_COMMAND",
+            exit_code=126,
+            error=message,
+            details={
+                "policy": "command-shape",
+                "intent": self.intent,
+                "tool": call.name,
+                "command": command,
+                "reason": "payload is not a recognized shell command",
+            },
+        )
+        return ToolResult(call.name, False, message, 126, raw)
+
     @staticmethod
     def _mutation_denied(call: ToolCall) -> ToolResult:
-        message = f"MUTATION_NOT_ALLOWED: task is READ_ONLY; {call.name} was blocked"
         is_shell = call.name == "run_command"
+        message = f"MUTATION_NOT_ALLOWED: task is READ_ONLY; {call.name} was blocked"
         raw = RawFacts(
             operation="shell" if is_shell else "write",
             path=None if is_shell else str(call.arguments.get("path", "")) or None,
