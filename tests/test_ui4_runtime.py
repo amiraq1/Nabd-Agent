@@ -9,8 +9,8 @@ provider, no secrets.
 from __future__ import annotations
 
 from pathlib import Path
-
 from nabd.agent import NabdAgent
+from nabd.approval import ApprovalMode
 from nabd.events import EventType
 from nabd.runtime import AgentRunResult, run_task
 
@@ -43,6 +43,7 @@ def test_run_task_default_no_auto_approve(tmp_path: Path):
     result = run_task(
         "عدّل README",
         root=tmp_path,
+        approval_mode=ApprovalMode.CONFIRM,
         llm_client=FakeLLMClient(tmp_path, plan_override=_write_plan("changed\n")),
         approval_callback=cb,
     )
@@ -59,6 +60,7 @@ def test_events_ordered_and_completed(tmp_path: Path):
     result = run_task(
         "حدّث README",
         root=tmp_path,
+        approval_mode=ApprovalMode.CONFIRM,
         llm_client=FakeLLMClient(tmp_path, plan_override=_write_plan("new\n")),
         approval_callback=lambda r: True,
     )
@@ -86,6 +88,7 @@ def test_approval_required_then_accepted(tmp_path: Path):
     result = run_task(
         "عدّل README",
         root=tmp_path,
+        approval_mode=ApprovalMode.CONFIRM,
         llm_client=FakeLLMClient(tmp_path, plan_override=_write_plan("changed\n")),
         approval_callback=cb,
     )
@@ -110,6 +113,7 @@ def test_verification_failed_rollback_event(tmp_path: Path):
     result = run_task(
         "عدّل README",
         root=tmp_path,
+        approval_mode=ApprovalMode.CONFIRM,
         max_rounds=3,
         llm_client=FakeLLMClient(tmp_path, plan_override=plan),
         approval_callback=lambda r: True,
@@ -140,6 +144,7 @@ def test_unknown_change_detected(tmp_path: Path):
         result = run_task(
             "اقرأ README",
             root=tmp_path,
+            approval_mode=ApprovalMode.CONFIRM,
             llm_client=FakeLLMClient(
                 tmp_path,
                 plan_override={
@@ -175,6 +180,7 @@ def test_timeout_event(tmp_path: Path):
         result = run_task(
             "اقرأ README",
             root=tmp_path,
+            approval_mode=ApprovalMode.CONFIRM,
             llm_client=FakeLLMClient(
                 tmp_path,
                 plan_override={
@@ -197,6 +203,7 @@ def test_task_completed_only_with_evidence(tmp_path: Path):
     result = run_task(
         "عدّل README",
         root=tmp_path,
+        approval_mode=ApprovalMode.CONFIRM,
         llm_client=FakeLLMClient(tmp_path, plan_override=_write_plan("new\n")),
         approval_callback=lambda r: True,
     )
@@ -213,6 +220,7 @@ def test_fake_client_no_network(tmp_path: Path):
     run_task(
         "عدّل README",
         root=tmp_path,
+        approval_mode=ApprovalMode.CONFIRM,
         llm_client=client,
         approval_callback=lambda r: True,
     )
@@ -236,6 +244,7 @@ def test_ui_crash_does_not_break_core(tmp_path: Path):
     result = run_task(
         "عدّل README",
         root=tmp_path,
+        approval_mode=ApprovalMode.CONFIRM,
         llm_client=FakeLLMClient(tmp_path, plan_override=_write_plan("new\n")),
         event_sink=BrokenSink(),
         approval_callback=lambda r: True,
