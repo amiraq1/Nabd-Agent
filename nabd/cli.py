@@ -8,6 +8,8 @@ import sys
 from pathlib import Path
 
 from .agent import NabdAgent
+from .approval import ApprovalMode
+from .rich_renderer import RichEventSink
 from .llm import LLMError
 
 
@@ -23,6 +25,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--provider", choices=["auto", "openai", "gemini", "nvidia"], default=os.getenv("NABD_PROVIDER", "auto"))
     parser.add_argument("--max-rounds", type=int, default=5, help="الحد الأقصى لدورات الإصلاح")
+    parser.add_argument(
+        "--rich", dest="rich_ui", action="store_true",
+        help="عرض أحداث الوكيل عبر Rich؛ طبقة عرض فقط ولا تملك قرارات الأمان",
+    )
     parser.add_argument(
         "--workspace-free",
         action="store_true",
@@ -58,11 +64,15 @@ def main(argv: list[str] | None = None) -> int:
     if args.workspace_free:
         print("وضع الأدوات: workspace-free (داخل الجذر فقط)")
     try:
+        rich_sink = RichEventSink(live=True) if args.rich_ui else None
+        approval_mode = ApprovalMode.AUTO if effective_auto_approve else ApprovalMode.CONFIRM
         agent = NabdAgent(
             root,
             provider=args.provider,
             auto_approve=effective_auto_approve,
             workspace_free=args.workspace_free,
+            approval_mode=approval_mode,
+            event_sink=rich_sink,
         )
     except LLMError as exc:
         print(f"خطأ في إعداد المزود: {exc}", file=sys.stderr)

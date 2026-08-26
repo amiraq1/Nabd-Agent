@@ -1,6 +1,6 @@
 # Nabd Agent for Termux
 
-**Nabd** هو وكيل برمجة يعمل من سطر الأوامر داخل مجلد المشروع. يقرأ بنية المشروع وملفاته، يضع خطة، يقترح تعديلات كاملة للملفات، ينفّذ الاختبارات أو أوامر التحقق، ثم يعيد محاولة الإصلاح عند ظهور أخطاء. صُمّم الإصدار الأول دون حزم Python خارجية، لذلك يمكن تشغيله في Termux بعد تثبيت Python فقط.
+**Nabd** هو وكيل برمجة يعمل من سطر الأوامر داخل مجلد المشروع. يقرأ بنية المشروع وملفاته، يضع خطة، يقترح تعديلات كاملة للملفات، ينفّذ الاختبارات أو أوامر التحقق، ثم يعيد محاولة الإصلاح عند ظهور أخطاء. نواة التشغيل تعتمد على مكتبات Python القياسية، بينما تُستخدم مكتبة `Rich` اختياريًا لواجهة العرض الطرفية.
 
 ## التصميم
 
@@ -35,7 +35,11 @@ cd ~/storage/shared/nabd-agent-termux
 bash install.sh
 ```
 
-لا يحتاج Nabd إلى `pip install` في هذا الإصدار؛ فهو يستخدم مكتبات Python القياسية فقط.
+لا يحتاج تشغيل النواة إلى حزم خارجية. إذا أردت واجهة Rich الاختيارية، ثبّت الاعتماد داخل بيئة Termux:
+
+```sh
+python3 -m pip install rich
+```
 
 ## إعداد مزود الذكاء الاصطناعي
 
@@ -93,6 +97,33 @@ nabd "نفّذ الإصلاحات والاختبارات دون طلب مواف�
 nabd "أصلح جميع الاختبارات الفاشلة" --max-rounds 3
 ```
 
+### واجهة Rich وربط Runtime
+
+يمكن تفعيل العرض الطرفي الاختياري باستخدام `--rich`:
+
+```sh
+nabd --rich --confirm --root ~/projects/app \
+  "راجع بنية المشروع وشغّل اختبارات التحقق"
+```
+
+يمر مسار العرض بالترتيب `AgentEvent → EventBoundary → EventAdapter → RichRenderer`. تقوم النواة بالتحقق والتنقيح وتسجيل الحدث أولًا، ثم يحوّله الـAdapter إلى `UiEvent` غير قابل للتغيير. واجهة Rich لا تنفّذ أدوات ولا تنشئ Evidence ولا تحسب `PASS` أو `BLOCKED`. سجل الأحداث canonical هو التاريخ المرجعي، أما طابور العرض فهو محدود السعة ويمكن أن يسقط عناصر العرض عند البطء دون فقدان السجل.
+
+عند استدعاء Runtime برمجيًا يجب تحديد `ApprovalMode` صراحةً؛ لا توجد قيمة افتراضية لـ`run_task`:
+
+```python
+from nabd.approval import ApprovalMode
+from nabd.runtime import run_task
+
+result = run_task(
+    "عدّل README وشغّل الاختبار",
+    root=".",
+    approval_mode=ApprovalMode.CONFIRM,
+    approval_callback=lambda request: request.get("tool") == "write_file",
+)
+```
+
+وضع `CONFIRM` هو المسار التفاعلي/المتزامن، وأي رفض أو `EOF` أو خطأ من واجهة العرض يؤدي إلى الرفض. وضع `AUTO` لا يُستخدم إلا بتمرير `approval_mode=ApprovalMode.AUTO` صراحةً، ويظل خاضعًا لـWorkspaceJail وMutation Policy وEvidenceStore وFSM.
+
 ## سياسة نطاق المهمة
 
 قبل أن يطلب الوكيل خطة من النموذج، يصنف نص المهمة إلى نطاقين. مهام الفحص والملخص والتدقيق مثل `inspect` و`audit` و`summarize` و`افحص` و`ملخص` تُصنف `READ_ONLY`. أما المهام التي تتضمن إنشاء أو كتابة أو تعديل أو إصلاح أو حذف مثل `create` و`write` و`fix` و`أنشئ` و`عدّل` فتُصنف `MUTATING`. عند وجود مؤشرات من النوعين معًا، تنتصر `MUTATING` لأن طلب الإصلاح الصريح لا ينبغي أن يُحجب بسبب كلمة فحص.
@@ -120,12 +151,14 @@ nabd --workspace-free --root ~/projects/app \
 
 ## تشغيل الاختبارات المحلية
 
-يمكن اختبار مكوّن FSM دون مفتاح API:
+يمكن اختبار النواة وواجهة UI4 دون مفتاح API:
 
 ```sh
-python3 -m unittest discover -s tests -v
-python3 -m compileall -q nabd
+PYTHONDONTWRITEBYTECODE=1 python3 -B -m unittest discover -s tests -v
+PYTHONDONTWRITEBYTECODE=1 python3 -B -m compileall -q nabd
 ```
+
+اختبارات Runtime الدالية التي تعتمد على `tmp_path` تُشغّل عبر harness الاختبار الخاص بها، بينما جامع `unittest` يشغّل اختبارات العقد والـAdapter والـRenderer وEvidence read-through.
 
 ## الملفات الرئيسية
 
@@ -133,6 +166,13 @@ python3 -m compileall -q nabd
 | --- | --- |
 | `nabd/fsm.py` | آلة الحالات المستوحاة من الملف المشارك. |
 | `nabd/agent.py` | حلقة التخطيط والتنفيذ والتحقق والإصلاح، وتصنيف نطاق المهمة وتطهير بادئات `run_command` الوهمية قبل تنفيذ التحقق. |
+| `nabd/approval.py` | ApprovalMode وProviders المتزامنة؛ النواة هي صاحبة قرار الموافقة ورفض الأخطاء. |
+| `nabd/events.py` | AgentEvent schema وأحداث النواة المرسلة إلى sink اختياري. |
+| `nabd/event_contract.py` | التحقق من العقد المغلق، منع التكرار، كشف gaps/late، وتنقيح الحد الفاصل. |
+| `nabd/ui_adapter.py` | إسقاط AgentEvent إلى UiEvent immutable للعرض فقط. |
+| `nabd/event_stream.py` | سجل canonical append-only وطابور عرض محدود السعة. |
+| `nabd/rich_renderer.py` | RichRenderer وRichEventSink؛ عرض فقط دون تنفيذ أو قرارات أمان. |
+| `nabd/runtime.py` | `run_task` لربط Agent بالنماذج وEvent Sink مع ApprovalMode إلزامي. |
 | `nabd/llm.py` | اتصال OpenAI وGemini باستخدام HTTP ومكتبات Python القياسية. |
 | `nabd/tools.py` | طبقة تحويل ToolCall إلى ToolResult يحمل RawFacts، وتطبيق Mutation Policy قبل تنفيذ الكتابة أو أوامر Shell غير الآمنة للقراءة. |
 | `nabd/write_tool.py` | أداة كتابة تعيد RawFacts عن الملف والنسخة الاحتياطية؛ لا تصدر Evidence. |

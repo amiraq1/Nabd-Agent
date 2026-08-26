@@ -10,6 +10,7 @@ import uuid
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Mapping, Optional, Set, Tuple
 
+from .approval import ApprovalMode, ApprovalProvider, CallbackApprovalProvider, InteractiveApprovalProvider, coerce_approval_mode
 from .evidence import EvidenceStore
 from .fsm import FSM, FSMError, State
 from .llm import LLMClient, LLMError
@@ -260,6 +261,8 @@ class NabdAgent:
         controlled_mutation: bool = False,
         event_sink: Optional[AgentEventSink] = None,
         approval_callback: Optional[Callable[[Mapping[str, Any]], bool]] = None,
+        approval_mode: ApprovalMode | str | None = None,
+        approval_provider: Optional[ApprovalProvider] = None,
     ) -> None:
         # Test-only dependency injection: a fake client may be supplied so the
         # agent can run deterministically offline. In production llm_client is
@@ -267,8 +270,26 @@ class NabdAgent:
         self.client = llm_client if llm_client is not None else LLMClient(provider)
         self.fsm = FSM()
         self.history: List[ToolResult] = []
-        self.auto_approve = auto_approve or workspace_free
+        # The public runtime requires approval_mode explicitly. The lower-level
+        # constructor retains a compatibility bridge for existing CLI/tests:
+        # legacy auto_approve/workspace_free opt into AUTO; otherwise CONFIRM.
+        self.approval_mode = (
+            coerce_approval_mode(approval_mode)
+            if approval_mode is not None
+            else (ApprovalMode.AUTO if (auto_approve or workspace_free) else ApprovalMode.CONFIRM)
+        )
+        if workspace_free and self.approval_mode is not ApprovalMode.AUTO:
+            raise ValueError("workspace_free requires explicit approval_mode=AUTO")
+        if auto_approve and self.approval_mode is not ApprovalMode.AUTO:
+            raise ValueError("auto_approve requires explicit approval_mode=AUTO")
+        self.auto_approve = self.approval_mode is ApprovalMode.AUTO
         self.workspace_free = workspace_free
+        if approval_provider is not None:
+            self.approval_provider = approval_provider
+        elif approval_callback is not None:
+            self.approval_provider = CallbackApprovalProvider(approval_callback)
+        else:
+            self.approval_provider = InteractiveApprovalProvider()
         self.intent = "MUTATING"
         self.task_id = EvidenceStore.new_task_id()
         self.evidence = EvidenceStore(root, task_id=self.task_id)
@@ -307,7 +328,6 @@ class NabdAgent:
         # M7/M8 (UI-4): optional event stream + approval callback. Both are
         # additive: core behaviour is identical when they are None.
         self.event_sink: Optional[AgentEventSink] = event_sink
-        self.approval_callback: Optional[Callable[[Mapping[str, Any]], bool]] = approval_callback
         self.session_id: str = uuid.uuid4().hex
         self._event_seq: int = 0
 
@@ -357,32 +377,15 @@ class NabdAgent:
             "display": format_call(call),
         }
         self._publish(EventType.APPROVAL_REQUIRED, payload={"request": request})
-        if self.auto_approve:
+        if self.approval_mode is ApprovalMode.AUTO:
             self._publish(
                 EventType.APPROVAL_ACCEPTED,
                 payload={"request": request, "auto": True},
             )
             return True
-        if self.approval_callback is not None:
-            try:
-                decision = bool(self.approval_callback(request))
-            except Exception:
-                decision = False
-            self._publish(
-                EventType.APPROVAL_ACCEPTED if decision else EventType.APPROVAL_DENIED,
-                payload={"request": request, "decision": decision},
-            )
-            return decision
-        # Fallback: interactive terminal prompt (original behaviour).
-        print(f"\nطلب الوكيل تنفيذ: {format_call(call)}")
-        try:
-            answer = input("السماح؟ [y/N]: ").strip().casefold()
-        except (EOFError, KeyboardInterrupt):
-            decision = False
-        else:
-            # Explicit allowlist: every other value, including n/no/لا/blank,
-            # denies the operation. There is no implicit approval path here.
-            decision = answer in {"y", "yes", "نعم"}
+        # CONFIRM is core-owned and synchronous. The provider may be a Rich/UI
+        # adapter, but it never receives authority to bypass ToolExecutor policy.
+        decision = self.approval_provider.decide(request)
         self._publish(
             EventType.APPROVAL_ACCEPTED if decision else EventType.APPROVAL_DENIED,
             payload={"request": request, "decision": decision},
@@ -574,6 +577,14 @@ class NabdAgent:
                     attempt_seq=self._attempt_seq,
                 )
 
+    def _report_evidence_ids(self, report: Report) -> List[str]:
+        """Return only evidence IDs already issued by the core EvidenceStore."""
+        return [
+            str(result.evidence_id)
+            for result in report.results
+            if getattr(result, "evidence_id", "")
+        ]
+
     def _run_with_gate(
         self,
         task: str,
@@ -747,30 +758,71 @@ class NabdAgent:
 
                 print(f"\n[بوابة التحقق] القرار: {report.decision.value}")
                 print(f"  {report.summary}")
+                report_evidence_ids = self._report_evidence_ids(report)
+                report_evidence_id = report_evidence_ids[0] if report_evidence_ids else None
+                report_payload = {"summary": report.summary}
+                if report_evidence_ids:
+                    report_payload["evidence_ids"] = report_evidence_ids
 
                 if self._unknown_paths:
                     self._publish(EventType.UNKNOWN_CHANGE_DETECTED, payload={"paths": sorted(self._unknown_paths)})
                 if report.decision == Decision.PASS:
-                    self._publish(EventType.VERIFICATION_PASSED, payload={"summary": report.summary})
+                    self._publish(
+                        EventType.VERIFICATION_PASSED,
+                        evidence_id=report_evidence_id,
+                        payload=report_payload,
+                    )
                 elif report.decision == Decision.ROLLBACK:
-                    self._publish(EventType.VERIFICATION_FAILED, payload={"decision": "ROLLBACK", "summary": report.summary})
-                    self._publish(EventType.ROLLBACK_STARTED, payload={"summary": report.summary})
-                    self._publish(EventType.ROLLBACK_COMPLETED, payload={"summary": report.summary})
-                    self._publish(EventType.TASK_FAILED, payload={"summary": report.summary, "state": self.fsm.state.name, "error": f"Rolled back: {report.summary}"})
+                    self._publish(
+                        EventType.VERIFICATION_FAILED,
+                        evidence_id=report_evidence_id,
+                        payload={"decision": "ROLLBACK", **report_payload},
+                    )
+                    self._publish(EventType.ROLLBACK_STARTED, evidence_id=report_evidence_id, payload=report_payload)
+                    self._publish(EventType.ROLLBACK_COMPLETED, evidence_id=report_evidence_id, payload=report_payload)
+                    self._publish(
+                        EventType.TASK_FAILED,
+                        evidence_id=report_evidence_id,
+                        payload={"state": self.fsm.state.name, "error": f"Rolled back: {report.summary}", **report_payload},
+                    )
                 elif report.decision == Decision.BLOCKED:
-                    self._publish(EventType.VERIFICATION_FAILED, payload={"decision": "BLOCKED", "summary": report.summary})
-                    self._publish(EventType.TASK_FAILED, payload={"summary": report.summary, "state": self.fsm.state.name, "error": f"Blocked: {report.summary}"})
+                    self._publish(
+                        EventType.VERIFICATION_FAILED,
+                        evidence_id=report_evidence_id,
+                        payload={"decision": "BLOCKED", **report_payload},
+                    )
+                    self._publish(
+                        EventType.TASK_FAILED,
+                        evidence_id=report_evidence_id,
+                        payload={"state": self.fsm.state.name, "error": f"Blocked: {report.summary}", **report_payload},
+                    )
                 elif report.decision == Decision.TIMEOUT:
-                    self._publish(EventType.VERIFICATION_FAILED, payload={"decision": "TIMEOUT", "summary": report.summary})
-                    self._publish(EventType.TIMEOUT, payload={"summary": report.summary})
-                    self._publish(EventType.TASK_FAILED, payload={"summary": report.summary, "state": self.fsm.state.name, "error": f"Timeout: {report.summary}"})
+                    self._publish(
+                        EventType.VERIFICATION_FAILED,
+                        evidence_id=report_evidence_id,
+                        payload={"decision": "TIMEOUT", **report_payload},
+                    )
+                    self._publish(EventType.TIMEOUT, evidence_id=report_evidence_id, payload=report_payload)
+                    self._publish(
+                        EventType.TASK_FAILED,
+                        evidence_id=report_evidence_id,
+                        payload={"state": self.fsm.state.name, "error": f"Timeout: {report.summary}", **report_payload},
+                    )
                 else:  # REPAIR
-                    self._publish(EventType.VERIFICATION_FAILED, payload={"decision": "REPAIR", "summary": report.summary})
+                    self._publish(
+                        EventType.VERIFICATION_FAILED,
+                        evidence_id=report_evidence_id,
+                        payload={"decision": "REPAIR", **report_payload},
+                    )
 
                 if report.decision == Decision.PASS:
                     self.evidence.save()
                     self.fsm.complete(True)
-                    self._publish(EventType.TASK_COMPLETED, payload={"summary": last_summary, "state": self.fsm.state.name})
+                    self._publish(
+                        EventType.TASK_COMPLETED,
+                        evidence_id=report_evidence_id,
+                        payload={"summary": last_summary, "state": self.fsm.state.name, **({"evidence_ids": report_evidence_ids} if report_evidence_ids else {})},
+                    )
                     return AgentResult(
                         ok=True,
                         state=self.fsm.state.name,

@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping, Optional
 
 from .agent import NabdAgent
+from .approval import ApprovalMode, coerce_approval_mode
 from .event_contract import EventBoundary
 from .events import AgentEventSink, AgentRunResult, TeeEventSink
 
@@ -22,22 +23,24 @@ def run_task(
     root: str | Path = ".",
     provider: str = "auto",
     max_rounds: int = 3,
-    auto_approve: bool = False,
     workspace_free: bool = False,
     llm_client: Optional[Any] = None,
     event_sink: Optional[AgentEventSink] = None,
     approval_callback: Optional[Callable[[Mapping[str, Any]], bool]] = None,
+    *,
+    approval_mode: ApprovalMode | str,
 ) -> AgentRunResult:
     """Run a single agent task and stream events to the Renderer.
 
     Thin wrapper over :meth:`NabdAgent.run`; core logic is untouched. Pass a
-    fake client (e.g. ``helpers.fake_llm.FakeLLMClient``) to keep it offline and
-    deterministic for tests. ``auto_approve`` defaults to ``False`` so the first
-    UI run is always manual.
+        fake client (e.g. ``helpers.fake_llm.FakeLLMClient``) to keep it offline and deterministic for tests. ``approval_mode`` is mandatory: callers must
+    explicitly choose ``CONFIRM`` or ``AUTO``; there is no implicit AUTO path.
+
 
     Streaming: events are published live to ``event_sink`` (the Rich renderer)
     and also captured in the returned ``AgentRunResult.events`` list.
     """
+    mode = coerce_approval_mode(approval_mode)
     capturer = TeeEventSink(event_sink)
     # The boundary validates + redacts every event before it reaches the
     # Renderer (or the capturer that records it for tests).
@@ -45,8 +48,9 @@ def run_task(
     agent = NabdAgent(
         root,
         provider=provider,
-        auto_approve=auto_approve,
+        auto_approve=mode is ApprovalMode.AUTO,
         workspace_free=workspace_free,
+        approval_mode=mode,
         llm_client=llm_client,
         event_sink=boundary,
         approval_callback=approval_callback,
